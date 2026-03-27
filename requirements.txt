@@ -1,0 +1,8 @@
+# 文件解析依赖
+PyMuPDF>=1.23.0
+python-docx>=1.1.0
+openpyxl>=3.1.0
+xlrd>=2.0.1
+
+# 系统依赖
+python-dotenv>=1.0.0

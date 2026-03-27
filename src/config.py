@@ -1,0 +1,180 @@
+"""
+全局配置模块
+"""
+import os
+from dataclasses import dataclass, field
+from typing import Optional
+from pathlib import Path
+
+
+@dataclass
+class LLMConfig:
+    """LLM模型配置"""
+    provider: str = "deepseek"  # openai, deepseek, anthropic, local
+    model: str = "deepseek-chat"
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    streaming: bool = True  # 默认启用流式输出
+
+
+@dataclass
+class DatabaseConfig:
+    """数据库配置"""
+    enabled: bool = False
+    provider: str = "postgresql"  # postgresql, sqlite, etc.
+    host: str = "localhost"
+    port: int = 5432
+    database: str = "doc_intel"
+    username: str = "postgres"
+    password: str = ""
+
+
+@dataclass
+class FileConfig:
+    """文件配置"""
+    max_file_size_mb: int = 50
+    supported_document_types: list = field(default_factory=lambda: ["docx", "pdf", "txt", "md"])
+    supported_table_types: list = field(default_factory=lambda: ["xlsx", "xls", "csv"])
+
+
+@dataclass
+class AgentConfig:
+    """Agent配置"""
+    prompts: dict = field(default_factory=lambda: {
+        "conversation": """你是一个友好的人工智能助手，基于文档智能系统运行。
+
+系统能力：
+1. 文档理解 - 解析并理解docx、pdf、txt、md等文档内容
+2. 文档编辑 - 按要求编辑Word文档
+3. 实体提取 - 从文档中提取数据填入Excel模板
+4. 表格填表 - 从Excel筛选数据填入表格
+
+你可以：
+1. 回答用户的问题
+2. 提供系统使用帮助
+3. 解释系统的各项功能
+4. 根据用户需求推荐合适的工作模式
+
+请友好地与用户交流，并根据需要介绍系统的功能。""",
+
+        "document": """你是一个专业的文档理解和编辑助手。
+你有以下能力：
+1. 理解并总结各类文档内容
+2. 回答关于文档的问题
+3. 编辑和修改Word文档
+4. 进行文档格式转换
+
+请根据用户的需求执行相应操作。""",
+
+        "extraction": """你是一个专业的实体提取助手。
+你有以下能力：
+1. 理解用户的数据提取需求
+2. 从非结构化文档（Word、Markdown、纯文本）中提取指定字段
+3. 将提取的数据以JSON格式返回
+
+请根据用户的需求和模板，从文档中提取相应的实体数据。""",
+
+        "database": """你是一个数据库管理助手。
+你有以下能力：
+1. 根据数据结构自动创建数据库表
+2. 将JSON数据存入数据库
+3. 执行数据库查询操作
+
+请根据提供的数据结构执行相应的数据库操作。""",
+
+        "table": """你是一个表格数据处理助手。
+你有以下能力：
+1. 根据用户要求筛选Excel数据
+2. 对数据进行统计、汇总等操作
+3. 将处理结果填入Word或Excel表格模板
+
+请根据用户的需求执行相应的数据处理和填表操作。""",
+    })
+
+    def get_prompt(self, agent_type: str) -> str:
+        """获取指定类型的agent提示词"""
+        return self.prompts.get(agent_type, "")
+
+
+@dataclass
+class SystemConfig:
+    """系统全局配置"""
+    debug: bool = False
+    log_level: str = "INFO"
+    log_file: str = "logs/app.log"
+    work_dir: str = "workspace"
+    output_dir: str = "output"
+    temp_dir: str = "temp"
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    file: FileConfig = field(default_factory=FileConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
+
+
+def load_config() -> SystemConfig:
+    """
+    加载系统配置
+    支持从环境变量或配置文件加载
+    """
+    config = SystemConfig()
+
+    # LLM配置 (支持 DeepSeek)
+    if os.getenv("DEEPSEEK_API_KEY"):
+        config.llm.provider = "deepseek"
+        config.llm.api_key = os.getenv("DEEPSEEK_API_KEY")
+        config.llm.model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        config.llm.base_url = "https://api.deepseek.com"
+    elif os.getenv("OPENAI_API_KEY"):
+        config.llm.api_key = os.getenv("OPENAI_API_KEY")
+    if os.getenv("LLM_PROVIDER"):
+        config.llm.provider = os.getenv("LLM_PROVIDER")
+    if os.getenv("LLM_MODEL"):
+        config.llm.model = os.getenv("LLM_MODEL")
+    if os.getenv("LLM_BASE_URL"):
+        config.llm.base_url = os.getenv("LLM_BASE_URL")
+
+    # 数据库配置
+    if os.getenv("DB_ENABLED"):
+        config.database.enabled = os.getenv("DB_ENABLED").lower() == "true"
+    if os.getenv("DB_HOST"):
+        config.database.host = os.getenv("DB_HOST")
+    if os.getenv("DB_PASSWORD"):
+        config.database.password = os.getenv("DB_PASSWORD")
+
+    # 调试模式
+    if os.getenv("DEBUG"):
+        config.debug = os.getenv("DEBUG").lower() == "true"
+        config.log_level = "DEBUG"
+
+    # Agent配置
+    if os.getenv("AGENT_SYSTEM_PROMPT"):
+        config.agent.system_prompt = os.getenv("AGENT_SYSTEM_PROMPT")
+
+    # 创建必要目录
+    for dir_path in [config.log_file.split("/")[0] if "/" in config.log_file else config.log_file]:
+        Path(dir_path).mkdir(parents=True, exist_ok=True)
+    Path(config.work_dir).mkdir(parents=True, exist_ok=True)
+    Path(config.output_dir).mkdir(parents=True, exist_ok=True)
+    Path(config.temp_dir).mkdir(parents=True, exist_ok=True)
+
+    return config
+
+
+# 全局配置实例
+_config: Optional[SystemConfig] = None
+
+
+def get_config() -> SystemConfig:
+    """获取全局配置实例"""
+    global _config
+    if _config is None:
+        _config = load_config()
+    return _config
+
+
+def set_config(config: SystemConfig):
+    """设置全局配置"""
+    global _config
+    _config = config
