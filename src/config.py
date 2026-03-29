@@ -21,14 +21,20 @@ class LLMConfig:
 
 @dataclass
 class DatabaseConfig:
-    """数据库配置"""
+    """数据库配置（PostgreSQL / Supabase 兼容）"""
     enabled: bool = False
     provider: str = "postgresql"  # postgresql, sqlite, etc.
+    # 完整连接串：设置后优先使用（Supabase 控制台 「Database」→「Connection string」）
+    url: Optional[str] = None
     host: str = "localhost"
     port: int = 5432
     database: str = "doc_intel"
     username: str = "postgres"
     password: str = ""
+    # 云数据库（含 Supabase）通常需要 require；未使用 url 分段配置时生效
+    sslmode: str = "prefer"
+    # 连接池上限（供 db.connection 使用）
+    pool_max_size: int = 10
 
 
 @dataclass
@@ -135,13 +141,30 @@ def load_config() -> SystemConfig:
     if os.getenv("LLM_BASE_URL"):
         config.llm.base_url = os.getenv("LLM_BASE_URL")
 
-    # 数据库配置
+    # 数据库配置（支持 DATABASE_URL / SUPABASE_DB_URL 或分段变量）
     if os.getenv("DB_ENABLED"):
         config.database.enabled = os.getenv("DB_ENABLED").lower() == "true"
+    for env in ("DATABASE_URL", "SUPABASE_DB_URL", "DB_URL"):
+        val = os.getenv(env)
+        if val:
+            config.database.url = val.strip()
+            break
     if os.getenv("DB_HOST"):
-        config.database.host = os.getenv("DB_HOST")
+        config.database.host = os.getenv("DB_HOST", "").strip()
+    if os.getenv("DB_PORT"):
+        config.database.port = int(os.getenv("DB_PORT", "5432"))
+    if os.getenv("DB_NAME"):
+        config.database.database = os.getenv("DB_NAME", "").strip()
+    if os.getenv("DB_USER"):
+        config.database.username = os.getenv("DB_USER", "").strip()
+    if os.getenv("DB_USERNAME"):
+        config.database.username = os.getenv("DB_USERNAME", "").strip()
     if os.getenv("DB_PASSWORD"):
-        config.database.password = os.getenv("DB_PASSWORD")
+        config.database.password = os.getenv("DB_PASSWORD", "")
+    if os.getenv("DB_SSLMODE"):
+        config.database.sslmode = os.getenv("DB_SSLMODE", "prefer").strip()
+    if os.getenv("DB_POOL_MAX"):
+        config.database.pool_max_size = int(os.getenv("DB_POOL_MAX", "10"))
 
     # 调试模式
     if os.getenv("DEBUG"):
