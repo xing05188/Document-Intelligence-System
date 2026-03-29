@@ -9,6 +9,10 @@ import json
 from .task_spec import TaskSpec, TaskType, FileInfo
 from .executor import TaskExecutor
 from config import SystemConfig, get_config
+from db.workflow_persistence import (
+    persist_workflow_execute_begin,
+    persist_workflow_execute_end,
+)
 from utils.logger import get_logger
 
 
@@ -63,18 +67,23 @@ class WorkflowCoordinator:
             self.logger.error(f"任务规格验证失败: {error_msg}")
             return WorkflowResult(success=False, message=error_msg)
 
-        # 获取对应的工作流处理器
+        persist_workflow_execute_begin(task_spec, self.config)
+
         handler = self._workflow_handlers.get(task_spec.task_type)
         if not handler:
-            return WorkflowResult(
-                success=False,
-                message=f"不支持的任务类型: {task_spec.task_type.value}"
-            )
+            msg = f"不支持的任务类型: {task_spec.task_type.value}"
+            persist_workflow_execute_end(task_spec, False, msg, self.config)
+            return WorkflowResult(success=False, message=msg)
 
         try:
-            return handler(task_spec)
+            result = handler(task_spec)
+            persist_workflow_execute_end(
+                task_spec, result.success, result.message, self.config
+            )
+            return result
         except Exception as e:
             self.logger.error(f"工作流执行失败: {str(e)}")
+            persist_workflow_execute_end(task_spec, False, str(e), self.config)
             return WorkflowResult(success=False, message=f"执行失败: {str(e)}")
 
     def _default_conversation_flow(self, task_spec: TaskSpec) -> WorkflowResult:
