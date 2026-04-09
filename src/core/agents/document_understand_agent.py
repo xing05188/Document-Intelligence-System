@@ -5,13 +5,35 @@ DocumentAgent - 文档理解 Agent
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, Generator, List, Optional, Any
 
 from .base_agent import BaseAgent, AgentResponse
-from config import SystemConfig
+from config import SystemConfig, get_config
 from core.orchestrator.task_spec import TaskSpec, FileInfo
 from core.llm.llm_service import LLMService, get_llm_service
 from utils.document_reader import read_document
+
+
+# 默认文档理解系统提示词
+DEFAULT_DOC_SYSTEM_PROMPT = """【身份】你是文档智能系统的 AI 助手，运行在【文档理解模式】下。
+
+【核心能力】
+1. **文档阅读** - 支持解析 docx、pdf、txt、md、xlsx、xls 等多种格式文档
+2. **内容理解** - 准确理解文档结构、文字、数据和图表
+3. **智能问答** - 围绕已上传的文档内容回答用户问题，支持多轮追问
+4. **统计分析** - 对表格数据进行统计（均值、中位数、标准差、分位数等）
+5. **要点提炼** - 提取文档核心观点、关键信息和数据结构
+
+【工作原则】
+- 始终基于已上传的文档内容回答，不要编造未提及的信息
+- 回答应简洁准确，优先使用 Markdown 格式（列表、粗体等）
+- 如果用户的问题涉及文档中未包含的内容，明确告知
+- 当文档包含表格数据时，先给出统计概览，再按需展开细节
+- 多文档场景下，区分说明各文档的内容和回答依据
+
+【系统说明】
+- 你只能访问用户通过界面上传的文档
+- 文件路径和上传信息仅供参考，请勿在回答中暴露文件物理路径"""
 
 
 class DocumentAgent(BaseAgent):
@@ -32,16 +54,12 @@ class DocumentAgent(BaseAgent):
         self._source_files: List[FileInfo] = []
         self._document_contents: Dict[str, str] = {}  # path -> content
 
-        self._system_prompt = """你是一个智能文档助手，擅长分析和总结文档内容。
-你有强大的理解能力，可以帮助用户解读各种类型的文档。
-请用中文详细分析文档内容，回答用户问题。
-
-重要提示：
-1. 文档开头标有"【统计摘要】"的部分包含Excel/CSV表格的自动统计分析结果，你应该首先解读这些统计特征
-2. 当文档包含【统计摘要】时，对于数值型列，重点关注：均值、中位数反映整体趋势；标准差和方差反映波动性；分位数反映分布形态；极值可能暗示异常
-3. 当文档包含【统计摘要】时，对于文本型列，关注唯一值数量和最常见值的频率分布
-4. 善于发现数据中的模式、异常和潜在问题
-"""
+        # 优先用 config 中配置的 prompt，其次用默认提示词
+        try:
+            cfg = config or get_config()
+            self._system_prompt = cfg.agent.get_prompt("document_understanding") or DEFAULT_DOC_SYSTEM_PROMPT
+        except Exception:
+            self._system_prompt = DEFAULT_DOC_SYSTEM_PROMPT
 
     def execute(self, task_spec: TaskSpec, **kwargs) -> AgentResponse:
         """
@@ -111,6 +129,83 @@ class DocumentAgent(BaseAgent):
     def get_system_prompt(self) -> str:
         """获取系统提示词"""
         return self._system_prompt
+
+    def set_system_prompt(self, prompt: str):
+        """外部注入系统提示词（供 API 层覆盖默认行为）"""
+        self._system_prompt = prompt
+
+    def _build_llm_messages(self, query: str) -> List[Dict[str, str]]:
+        """构建发给 LLM 的消息列表。"""
+        msgs = [{"role": "system", "content": self._system_prompt}]
+        msgs.extend(self._messages_history)
+        doc_context = self._build_doc_context()
+        if doc_context:
+            enhanced = (
+                f"请分析以下文档内容并回答用户问题：\n\n{doc_context}\n\n---\n\n用户问题: {query}"
+            )
+            msgs.append({"role": "user", "content": enhanced})
+        else:
+            msgs.append({"role": "user", "content": query})
+        return msgs
+
+    def stream_chat(self, user_input: str) -> Generator[str, None, None]:
+        """
+        同步生成器：直接遍历 client.stream()，每个 chunk yield LLM 分片。
+        在 async context 中用 async for 包装时，外层用 asyncio.to_thread。
+        """
+        from langchain_openai import ChatOpenAI
+
+        messages = self._build_llm_messages(user_input)
+        lc_messages = self._llm_service._convert_messages(messages)
+
+        client = ChatOpenAI(
+            api_key=self._llm_service._get_api_key(),
+            base_url=self._llm_service._get_base_url(),
+            model=self._llm_service.config.model,
+            temperature=self._llm_service.config.temperature,
+            max_tokens=self._llm_service.config.max_tokens,
+            streaming=True,
+        )
+
+        def _chunk_text(chunk) -> str:
+            raw = getattr(chunk, "content", None) or ""
+            if isinstance(raw, str):
+                return raw
+            if isinstance(raw, list):
+                parts = []
+                for block in raw:
+                    if isinstance(block, str):
+                        parts.append(block)
+                    elif isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(block.get("text", ""))
+                return "".join(parts)
+            return str(raw)
+
+        for chunk in client.stream(lc_messages):
+            text = _chunk_text(chunk)
+            if text:
+                yield text
+
+        self._messages_history.append({"role": "user", "content": user_input})
+        # 注意：流式无法在此获取完整回复内容，对话历史只记录用户消息
+        # 多轮对话精度由 _build_llm_messages 中的 _messages_history 控制
+
+    def chat(self, user_input: str) -> str:
+        """
+        交互式对话接口（一次性返回完整回复）
+        """
+        messages = self._build_llm_messages(user_input)
+        try:
+            response = self._llm_service.chat(
+                messages=messages,
+                strip_markdown_output=False,
+            )
+        except Exception as e:
+            return f"[错误] LLM 调用失败: {str(e)}"
+
+        self._messages_history.append({"role": "user", "content": user_input})
+        self._messages_history.append({"role": "assistant", "content": response})
+        return response
 
     def set_documents(self, files: List[FileInfo], max_rows: int = 100):
         """设置要处理的文档列表
