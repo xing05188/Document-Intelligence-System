@@ -35,7 +35,6 @@ class ConversationAgent(BaseAgent):
         try:
             return self._converse(task_spec)
         except Exception as e:
-            self.logger.error(f"对话执行失败: {str(e)}")
             return AgentResponse(
                 success=False,
                 message=f"对话失败: {str(e)}"
@@ -67,7 +66,7 @@ class ConversationAgent(BaseAgent):
         messages.extend(conversation_history[-10:])
         messages.append({"role": "user", "content": user_input})
 
-        return self._llm.chat(messages)
+        return self._llm.chat(messages, strip_markdown_output=False)
 
     def validate_input(self, task_spec: TaskSpec) -> tuple[bool, str]:
         """验证输入"""

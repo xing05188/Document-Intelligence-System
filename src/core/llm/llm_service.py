@@ -47,7 +47,6 @@ class MarkdownFilterCallback(BaseCallbackHandler):
     def on_llm_new_token(self, token: str, **kwargs) -> None:
         """每个新 token 到达时调用"""
         if self._first and self.prefix:
-            print(self.prefix, end='', flush=True)
             self._first = False
 
         self._buffer += token
@@ -61,7 +60,6 @@ class MarkdownFilterCallback(BaseCallbackHandler):
             if completed_lines:
                 clean = strip_markdown(completed_lines).strip()
                 if clean:
-                    print(clean, end='', flush=True)
                     if self.on_token:
                         self.on_token(clean)
 
@@ -72,7 +70,6 @@ class MarkdownFilterCallback(BaseCallbackHandler):
                 # 移除行首可能的列表标记残留
                 clean = re.sub(r'^\s*[-*+]\s*', '', clean)
                 if clean:
-                    print(clean, end='', flush=True)
                     if self.on_token:
                         self.on_token(clean)
             self._buffer = ""
@@ -82,7 +79,6 @@ class MarkdownFilterCallback(BaseCallbackHandler):
         if self._buffer:
             clean = strip_markdown(self._buffer).strip()
             if clean:
-                print(clean, end='', flush=True)
                 if self.on_token:
                     self.on_token(clean)
             self._buffer = ""
@@ -148,7 +144,7 @@ class LLMService:
         model: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        **kwargs
+        strip_markdown_output: bool = True,
     ) -> str:
         """
         发起聊天请求
@@ -158,7 +154,7 @@ class LLMService:
             model: 模型名称
             temperature: 温度参数
             max_tokens: 最大 token 数
-            **kwargs: 其他参数
+            strip_markdown_output: 为 False 时保留 Markdown（供前端渲染）
 
         Returns:
             LLM 响应文本
@@ -185,8 +181,10 @@ class LLMService:
 
         # 根据配置选择流式或普通调用
         if self.config.streaming:
-            callback = MarkdownFilterCallback()
-            return self._stream_invoke(client, langchain_messages, callback)
+            callback = MarkdownFilterCallback() if strip_markdown_output else None
+            return self._stream_invoke(
+                client, langchain_messages, callback, strip_markdown_output=strip_markdown_output
+            )
         else:
             response = client.invoke(langchain_messages)
             return response.content
@@ -241,7 +239,13 @@ class LLMService:
 
         return self.chat(messages, model, temperature, max_tokens)
 
-    def _stream_invoke(self, client: ChatOpenAI, messages, callback: MarkdownFilterCallback = None) -> str:
+    def _stream_invoke(
+        self,
+        client: ChatOpenAI,
+        messages,
+        callback: Optional[MarkdownFilterCallback] = None,
+        strip_markdown_output: bool = True,
+    ) -> str:
         """流式调用并收集完整响应"""
         full_response = ""
         for chunk in client.stream(messages):
@@ -251,9 +255,7 @@ class LLMService:
                 full_response += chunk.content
         if callback:
             callback.flush()
-        print()  # 换行
-        # 返回时也过滤 markdown 格式
-        return strip_markdown(full_response)
+        return strip_markdown(full_response) if strip_markdown_output else full_response
 
     def chat_with_history(
         self,

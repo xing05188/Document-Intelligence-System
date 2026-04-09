@@ -258,3 +258,13 @@ async def post_agent_log(task_id: str, body: Dict[str, Any]):
     except Exception as e:
         return JSONResponse(status_code=500, content=err_body("INTERNAL_ERROR", str(e)))
     return ok_body({"agent_log_id": rid})
+
+
+# ============ 注册新路由 ============
+
+from api.routers import sessions, messages, files, agents  # noqa: E402
+
+app.include_router(sessions.router)
+app.include_router(messages.router)
+app.include_router(files.router)
+app.include_router(agents.router)

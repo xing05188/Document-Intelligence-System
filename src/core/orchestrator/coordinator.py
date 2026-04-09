@@ -97,8 +97,6 @@ class WorkflowCoordinator:
         """
         self.logger.info("进入默认对话模式")
 
-        # 调用Agent进行对话（具体实现由各小组负责）
-        # 这里只提供框架接口
         result = self.executor.execute_agent(
             agent_name="conversation",
             task_spec=task_spec
@@ -106,7 +104,7 @@ class WorkflowCoordinator:
 
         return WorkflowResult(
             success=True,
-            message="对话完成",
+            message=result.message,
             data=result
         )
 
