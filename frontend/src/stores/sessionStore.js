@@ -56,7 +56,7 @@ export const useSessionStore = defineStore('session', () => {
     try {
       // 断开旧连接
       disconnectWebSocket()
-      const res = await sessionApi.create({ title: '新会话' })
+      const res = await sessionApi.create({ title: '新会话', current_mode: currentMode.value })
       sessions.value.unshift(res)
       await selectSession(res.session_id)
     } catch (e) {
@@ -275,6 +275,54 @@ export const useSessionStore = defineStore('session', () => {
     isStreaming.value = false
   }
 
+  // 清除所有已勾选的文件（发送消息后调用）
+  // 分两阶段：先立即更新本地 UI，后台同步数据库
+  function clearAllSelectedFiles() {
+    // 第一阶段：立即清除本地勾选状态（同步执行，UI 无延迟）
+    dataFiles.value.forEach(f => { f.is_selected = false })
+    templateFiles.value.forEach(f => { f.is_selected = false })
+
+    // 第二阶段：后台静默同步到数据库（异步，不阻塞）
+    syncFileSelectionToServer()
+  }
+
+  // 同步文件勾选状态到后端数据库
+  async function syncFileSelectionToServer() {
+    try {
+      const tasks = []
+      dataFiles.value.forEach(f => {
+        tasks.push(fileApi.updateSelection(currentSessionId.value, [{ file_id: f.id, is_selected: false }]))
+      })
+      templateFiles.value.forEach(f => {
+        tasks.push(fileApi.updateSelection(currentSessionId.value, [{ file_id: f.id, is_selected: false }]))
+      })
+      if (tasks.length > 0) {
+        await Promise.all(tasks)
+      }
+    } catch (e) {
+      console.error('同步文件勾选状态失败:', e)
+    }
+  }
+
+  // 获取当前勾选的文件列表（用于发送给后端）
+  function getSelectedFilesPayload() {
+    const dataFiles = selectedDataFiles.value.map(f => ({
+      file_id: f.id,
+      file_name: f.file_name,
+      file_path: f.file_path,
+      file_size: f.file_size,
+      is_selected: true,
+    }))
+    const templateFiles = selectedTemplateFiles.value.map(f => ({
+      file_id: f.id,
+      file_name: f.file_name,
+      file_path: f.file_path,
+      file_size: f.file_size,
+      is_selected: true,
+    }))
+    return { files: dataFiles, template_files: templateFiles }
+  }
+
   async function sendMessage(content) {
     if (!content.trim()) return
 
@@ -285,12 +333,19 @@ export const useSessionStore = defineStore('session', () => {
 
     const sessionId = currentSessionId.value
 
-    // 添加用户消息
+    // 获取当前勾选的文件（和消息一起发送；需在 push 前快照，供 UI 展示附件卡片）
+    const { files, template_files } = getSelectedFilesPayload()
+    const userMetadata = {}
+    if (files.length > 0) userMetadata.files = files
+    if (template_files.length > 0) userMetadata.template_files = template_files
+
+    // 添加用户消息（metadata 与后端持久化结构一致，用于「文件 + 文字」同条展示）
     messages.value.push({
       id: Date.now(),
       role: 'user',
       content: content.trim(),
       created_at: new Date().toISOString(),
+      metadata: Object.keys(userMetadata).length ? userMetadata : undefined,
     })
 
     // 若有 WebSocket，等待连接就绪后走流式
@@ -299,7 +354,11 @@ export const useSessionStore = defineStore('session', () => {
       ws.value.send(JSON.stringify({
         content: content.trim(),
         mode: currentMode.value,
+        files: files,
+        template_files: template_files,
       }))
+      // 发送消息后立即清除勾选 UI（不等 AI 响应）
+      clearAllSelectedFiles()
     } else {
       // 非流式
       isStreaming.value = true
@@ -307,6 +366,8 @@ export const useSessionStore = defineStore('session', () => {
         await messageApi.send(sessionId, {
           content: content.trim(),
           mode: currentMode.value,
+          files: files,
+          template_files: template_files,
         })
         await loadMessages(sessionId)
       } catch (e) {
@@ -354,6 +415,9 @@ export const useSessionStore = defineStore('session', () => {
     toggleFileSelection,
     deleteFile,
     sendMessage,
+    clearAllSelectedFiles,
+    syncFileSelectionToServer,
+    getSelectedFilesPayload,
     connectWebSocket,
     disconnectWebSocket,
   }

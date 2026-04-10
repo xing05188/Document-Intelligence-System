@@ -41,6 +41,28 @@ function formatTime(isoString) {
   return new Date(isoString).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
+function formatFileSize(bytes) {
+  if (bytes == null || Number.isNaN(Number(bytes))) return ''
+  const n = Number(bytes)
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(2)} KB`
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`
+}
+
+function fileExtLabel(fileName) {
+  if (!fileName || typeof fileName !== 'string') return 'FILE'
+  const ext = fileName.split('.').pop()
+  return ext ? ext.toUpperCase() : 'FILE'
+}
+
+/** 用户消息中与文字一并发送的附件（metadata 与后端一致） */
+function userMessageAttachments(msg) {
+  const m = msg.metadata || {}
+  const data = (m.files || []).map((f) => ({ ...f, _kind: 'data' }))
+  const tpl = (m.template_files || []).map((f) => ({ ...f, _kind: 'template' }))
+  return [...data, ...tpl]
+}
+
 function renderAssistant(msg) {
   return assistantMarkdownToHtml(msg.content)
 }
@@ -84,32 +106,66 @@ onUnmounted(() => {
             msg.role === 'user' ? 'justify-end' : 'justify-start'
           ]"
         >
+          <!-- 用户：带附件时「文件卡片 + 文案」作为一条消息（与参考图一致） -->
           <div
-            :class="[
-              'max-w-2xl rounded-lg px-4 py-2',
-              msg.role === 'user'
-                ? 'bg-green-600 text-white'
-                : 'bg-gray-100 text-gray-800'
-            ]"
+            v-if="msg.role === 'user' && userMessageAttachments(msg).length > 0"
+            class="max-w-md flex flex-col items-end gap-2"
           >
-            <!-- 消息内容：用户纯文本，助手 Markdown → HTML -->
             <div
-              v-if="msg.role === 'user'"
-              class="whitespace-pre-wrap break-words"
-            >{{ msg.content }}</div>
+              v-for="(att, idx) in userMessageAttachments(msg)"
+              :key="`${att.file_id ?? idx}-${att.file_name}`"
+              class="w-full max-w-sm rounded-lg border border-gray-200 bg-white px-3 py-2.5 shadow-sm"
+            >
+              <div class="flex items-start gap-3">
+                <div
+                  class="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-rose-50 text-xs font-bold text-rose-600"
+                  aria-hidden="true"
+                >
+                  {{ fileExtLabel(att.file_name).slice(0, 4) }}
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="truncate text-sm font-medium text-gray-900" :title="att.file_name">
+                    {{ att.file_name }}
+                  </div>
+                  <div class="mt-0.5 text-xs text-gray-400">
+                    {{ fileExtLabel(att.file_name) }}
+                    <span v-if="formatFileSize(att.file_size)"> | {{ formatFileSize(att.file_size) }}</span>
+                    <span v-if="att._kind === 'template'" class="ml-1 text-amber-600">· 模板</span>
+                  </div>
+                </div>
+              </div>
+            </div>
             <div
-              v-else
+              class="rounded-xl bg-amber-50/90 px-4 py-2.5 text-left text-[15px] leading-relaxed text-amber-950 shadow-sm ring-1 ring-amber-100/80"
+            >
+              <div class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
+            </div>
+            <div class="text-xs text-gray-400">
+              {{ formatTime(msg.created_at) }}
+            </div>
+          </div>
+
+          <!-- 用户：纯文字（无附件）保持原有绿色气泡 -->
+          <div
+            v-else-if="msg.role === 'user'"
+            class="max-w-2xl rounded-lg bg-green-600 px-4 py-2 text-white"
+          >
+            <div class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
+            <div class="mt-1 text-xs text-green-100">
+              {{ formatTime(msg.created_at) }}
+            </div>
+          </div>
+
+          <!-- 助手 -->
+          <div
+            v-else
+            class="max-w-2xl rounded-lg bg-gray-100 px-4 py-2 text-gray-800"
+          >
+            <div
               class="assistant-md break-words text-left"
               v-html="renderAssistant(msg)"
             />
-
-            <!-- 时间戳 -->
-            <div
-              :class="[
-                'text-xs mt-1',
-                msg.role === 'user' ? 'text-green-100' : 'text-gray-400'
-              ]"
-            >
+            <div class="mt-1 text-xs text-gray-400">
               {{ formatTime(msg.created_at) }}
             </div>
           </div>
