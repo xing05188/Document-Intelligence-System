@@ -145,6 +145,28 @@ class DocumentAgent(BaseAgent):
             )
             msgs.append({"role": "user", "content": enhanced})
         else:
+            # 无文档时：添加强约束系统提示，防止 LLM 幻觉
+            # 这是防止幻觉的核心屏障，必须足够清晰和强硬
+            no_doc_system = """【无文档场景 - 强制约束】
+
+## 当前状态
+当前没有任何文档已上传到系统中。
+
+## 绝对禁止的行为
+1. 绝对不要编造、假设或基于训练数据生成任何文档内容
+2. 绝对不要回复任何类似「已收到您的文档」「我现在开始分析」「根据文档...」的内容
+3. 绝对不要创建虚假的文档摘要、数据、表格或分析结果
+4. 禁止使用「根据您上传的文档」「从上文中可以看出」等暗示性表述
+
+## 正确的回复方式
+- 如果用户请求分析/阅读/查看文档：礼貌告知没有文档，请用户上传后再分析
+- 如果用户问其他问题：正常对话即可
+- 回复应该简洁、自然，像正常对话一样
+## 你的身份
+ 你是文档智能系统的文档理解模式的助手，可以用户您阅读、理解和分析上传的文档内容。
+
+"""
+            msgs.append({"role": "system", "content": no_doc_system})
             msgs.append({"role": "user", "content": query})
         return msgs
 
@@ -155,6 +177,7 @@ class DocumentAgent(BaseAgent):
         """
         from langchain_openai import ChatOpenAI
 
+        # 构建消息（无文档时会自动添加防幻觉约束）
         messages = self._build_llm_messages(user_input)
         lc_messages = self._llm_service._convert_messages(messages)
 
@@ -329,32 +352,8 @@ class DocumentAgent(BaseAgent):
 
     def _process_query(self, query: str) -> str:
         """处理用户查询"""
-        # 检查查询中是否包含新的文件路径
-        new_file_paths = self._extract_file_paths_from_text(query)
-
-        # 构建消息
-        messages = [{"role": "system", "content": self._system_prompt}]
-        messages.extend(self._messages_history)
-
-        # 构建文档上下文
-        doc_context = self._build_doc_context(new_file_paths)
-
-        if doc_context or new_file_paths:
-            # 有文档内容，增强查询
-            enhanced_query = query
-            if doc_context:
-                enhanced_query = f"""请分析以下文档内容并回答用户问题：
-
-{doc_context}
-
----
-
-用户问题: {query}"""
-
-            messages.append({"role": "user", "content": enhanced_query})
-        else:
-            # 无文档，普通对话
-            messages.append({"role": "user", "content": query})
+        # 构建消息（无文档时会自动添加防幻觉约束）
+        messages = self._build_llm_messages(query)
 
         # 调用 LLM
         try:
@@ -369,9 +368,6 @@ class DocumentAgent(BaseAgent):
         # 保存对话历史
         self._messages_history.append({"role": "user", "content": query})
         self._messages_history.append({"role": "assistant", "content": response})
-
-        # 清理 markdown（如果需要）
-        # response = self._clean_markdown(response)
 
         return response
 

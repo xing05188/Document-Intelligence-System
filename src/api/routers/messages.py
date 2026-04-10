@@ -25,6 +25,14 @@ class SendMessageRequest(BaseModel):
         description="工作模式；不传则使用会话在库中的 current_mode",
     )
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="元数据")
+    files: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="随消息附带的数据文件（与 WebSocket 一致；不传则从会话已选文件读取）",
+    )
+    template_files: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="随消息附带的模板文件",
+    )
 
 
 class MessageResponse(BaseModel):
@@ -76,16 +84,26 @@ async def send_message(session_id: str, request: SendMessageRequest):
     
     effective_mode = (request.mode or session.current_mode or "default_conversation").strip()
 
-    # 保存用户消息
+    user_meta: Dict[str, Any] = {**(request.metadata or {}), "mode": effective_mode}
+    if request.files:
+        user_meta["files"] = request.files
+    if request.template_files:
+        user_meta["template_files"] = request.template_files
+
+    # 保存用户消息（含附件元数据，供前端展示「文件 + 文字」为一条消息）
     user_msg = add_message(
         session_id,
         "user",
         request.content,
-        {**(request.metadata or {}), "mode": effective_mode},
+        user_meta,
         config=cfg,
     )
 
-    db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
+    if request.files is not None or request.template_files is not None:
+        db_data_files = list(request.files or [])
+        db_template_files = list(request.template_files or [])
+    else:
+        db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
 
     # 调用 Agent 服务获取回复（必须与前端所选模式一致，否则恒走默认对话）
     agent_service = AgentService()
@@ -138,8 +156,9 @@ manager = ConnectionManager()
 @router.websocket("/ws/{session_id}")
 async def websocket_chat(websocket: WebSocket, session_id: str):
     """
-    WebSocket 流式聊天
-    前端连接后发送 JSON 消息：{"content": "...", "mode": "...", "files": [...], "template_files": [...]}
+    WebSocket 流式聊天（长连接模式）
+    前端连接后可持续发送消息，后端保持连接循环处理。
+    每次前端发送 JSON：{"content": "...", "mode": "...", "files": [...], "template_files": [...]}
     后端流式返回：{"type": "chunk", "content": "..."} 或 {"type": "done", "content": "..."}
     """
     cfg = load_config()
@@ -153,49 +172,68 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
     await manager.connect(websocket, session_id)
     
     try:
-        # 保存用户消息
-        data = await websocket.receive_json()
-        user_content = data.get("content", "")
-        # 显式 null/空串时回退到会话记录的模式，避免误走默认对话
-        raw_mode = data.get("mode")
-        mode = (raw_mode or session.current_mode or "default_conversation")
-        if isinstance(mode, str):
-            mode = mode.strip() or "default_conversation"
-        client_files = data.get("files") or []
-        client_templates = data.get("template_files") or []
-        db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
-        # 以库中勾选为准；无勾选时再允许客户端传入（兼容旧前端）
-        files = db_data_files if db_data_files else client_files
-        template_files = db_template_files if db_template_files else client_templates
+        # 保持连接循环，持续处理消息
+        while True:
+            try:
+                # 等待接收消息（会阻塞在这里直到收到消息或连接关闭）
+                data = await websocket.receive_json()
+            except Exception:
+                # 连接已关闭或出错，退出循环
+                break
+            
+            user_content = data.get("content", "")
+            # 显式 null/空串时回退到会话记录的模式，避免误走默认对话
+            raw_mode = data.get("mode")
+            mode = (raw_mode or session.current_mode or "default_conversation")
+            if isinstance(mode, str):
+                mode = mode.strip() or "default_conversation"
+            
+            # 优先使用前端传来的文件（和消息一起发送）
+            # 这样用户可以随时切换勾选，文件跟随消息
+            client_files = data.get("files") or []
+            client_templates = data.get("template_files") or []
+            
+            # 如果前端没传文件（向后兼容），从数据库读取
+            if client_files or client_templates:
+                files = client_files
+                template_files = client_templates
+            else:
+                files, template_files = get_selected_session_files_payload(session_id, cfg)
 
-        # 保存用户消息
-        add_message(session_id, "user", user_content, {"mode": mode}, config=cfg)
-        
-        # 发送开始信号
-        await manager.send_json(session_id, {"type": "start"})
-        
-        # 流式调用 Agent 服务（传递文件信息）
-        agent_service = AgentService()
-        full_response = ""
-        
-        async for chunk in agent_service.chat_stream(
-            session_id, 
-            user_content, 
-            mode,
-            files=files,
-            template_files=template_files,
-        ):
-            full_response += chunk
-            await manager.send_json(session_id, {"type": "chunk", "content": chunk})
-        
-        # 保存 AI 回复
-        add_message(session_id, "assistant", full_response, {"mode": mode}, config=cfg)
-        
-        # 发送完成信号
-        await manager.send_json(session_id, {"type": "done"})
-        
+            user_meta: Dict[str, Any] = {"mode": mode}
+            if files:
+                user_meta["files"] = files
+            if template_files:
+                user_meta["template_files"] = template_files
+
+            # 保存用户消息（含附件元数据）
+            add_message(session_id, "user", user_content, user_meta, config=cfg)
+            
+            # 发送开始信号
+            await manager.send_json(session_id, {"type": "start"})
+            
+            # 流式调用 Agent 服务（传递文件信息）
+            agent_service = AgentService()
+            full_response = ""
+            
+            async for chunk in agent_service.chat_stream(
+                session_id, 
+                user_content, 
+                mode,
+                files=files,
+                template_files=template_files,
+            ):
+                full_response += chunk
+                await manager.send_json(session_id, {"type": "chunk", "content": chunk})
+            
+            # 保存 AI 回复
+            add_message(session_id, "assistant", full_response, {"mode": mode}, config=cfg)
+            
+            # 发送完成信号，通知前端可以发送下一条消息
+            await manager.send_json(session_id, {"type": "done"})
+            
     except WebSocketDisconnect:
-        manager.disconnect(session_id)
+        pass  # 正常断开
     except Exception as e:
         await manager.send_json(session_id, {"type": "error", "message": str(e)})
     finally:

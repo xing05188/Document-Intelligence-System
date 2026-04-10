@@ -50,9 +50,9 @@ function getFileTypeTag(type) {
 }
 
 async function handleUpload(file, fileType) {
+  // 无会话时自动创建（沿用当前选中的模式）
   if (!sessionStore.currentSessionId) {
-    message.warning('请先选择一个会话')
-    return
+    await sessionStore.createSession()
   }
   isUploading.value = true
   try {
