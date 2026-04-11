@@ -90,7 +90,7 @@ class WorkflowCoordinator:
             persist_workflow_execute_end(task_spec, False, str(e), self.config)
             return WorkflowResult(success=False, message=f"执行失败: {str(e)}")
 
-    def _default_conversation_flow(self, task_spec: TaskSpec) -> WorkflowResult:
+    def _default_conversation_flow(self, task_spec: TaskSpec, progress_callback=None) -> WorkflowResult:
         """
         默认对话模式
         直接与LLM交流，查询系统信息
@@ -233,7 +233,7 @@ class WorkflowCoordinator:
             output_file=saved_path or task_spec.output_file,
         )
 
-    def _table_filling_flow(self, task_spec: TaskSpec) -> WorkflowResult:
+    def _table_filling_flow(self, task_spec: TaskSpec, progress_callback=None) -> WorkflowResult:
         """
         表格填表模式
         1. Agent_D 筛选Excel数据
@@ -244,7 +244,8 @@ class WorkflowCoordinator:
         # Agent_D 处理表格
         result = self.executor.execute_agent(
             agent_name="agent_d",
-            task_spec=task_spec
+            task_spec=task_spec,
+            progress_callback=progress_callback,
         )
 
         return WorkflowResult(

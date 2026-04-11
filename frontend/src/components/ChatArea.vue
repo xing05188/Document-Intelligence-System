@@ -124,6 +124,24 @@ function isEntityExtractionMessage(msg) {
   return msg.role === 'assistant' && msg.extractionData && msg.extractionData.entities
 }
 
+// 判断消息是否需要渲染为表格填表结果卡片
+function isTableFillingMessage(msg) {
+  return msg.role === 'assistant' && msg.tableFillingData && msg.tableFillingData.success !== undefined
+}
+
+// 下载表格填表生成的文件（通过后端代理）
+function downloadTableFillingFile(path) {
+  sessionStore.downloadFile(path)
+}
+
+// 下载筛选后的行 JSON
+function downloadFilteredJson(msg) {
+  const outputJson = msg.tableFillingData?.output_json
+  if (outputJson) {
+    sessionStore.downloadFile(outputJson)
+  }
+}
+
 // 渲染单元格值（处理数组格式 [值, 位置]）
 function renderCellValue(rawValue) {
   if (Array.isArray(rawValue)) {
@@ -357,6 +375,72 @@ onUnmounted(() => {
                 共 {{ getTotalCount(msg.extractionData) }} 条记录，仅显示前 {{ MAX_TABLE_ROWS }} 条。完整数据已保存。
               </div>
             </template>
+
+            <!-- 表格填表结果卡片 -->
+            <template v-else-if="isTableFillingMessage(msg)">
+              <div class="mb-3">
+                <!-- 摘要行：标签 + 消息 + 统计 -->
+                <div class="flex items-center flex-wrap gap-2 mb-2">
+                  <n-tag type="warning" size="small">表格填表</n-tag>
+                  <span class="text-sm text-gray-600">{{ msg.tableFillingData.message }}</span>
+                  <n-tag v-if="msg.tableFillingData.matched_rows != null" type="info" size="small">
+                    命中 {{ msg.tableFillingData.matched_rows }}/{{ msg.tableFillingData.total_rows }} 行
+                  </n-tag>
+                  <n-tag v-if="msg.tableFillingData.template_filled" type="success" size="small">
+                    模板已填充
+                  </n-tag>
+                </div>
+                <!-- 字段映射（如果有） -->
+                <div v-if="msg.tableFillingData.template_mapping && Object.keys(msg.tableFillingData.template_mapping).length > 0" class="mb-2">
+                  <div class="text-xs text-gray-500 mb-1">字段映射：</div>
+                  <div class="flex flex-wrap gap-1">
+                    <span
+                      v-for="(target, source) in msg.tableFillingData.template_mapping"
+                      :key="source"
+                      class="inline-flex items-center gap-0.5 rounded bg-gray-200 px-2 py-0.5 text-xs"
+                    >
+                      <span class="text-gray-500">{{ source }}</span>
+                      <span class="text-gray-400">→</span>
+                      <span class="font-medium text-gray-700">{{ target }}</span>
+                    </span>
+                  </div>
+                </div>
+                <!-- 下载按钮 -->
+                <div class="flex items-center gap-2 mt-2">
+                  <!-- 填表文件下载 -->
+                  <n-button
+                    v-if="msg.tableFillingData.template_output"
+                    size="tiny"
+                    type="success"
+                    @click="downloadTableFillingFile(msg.tableFillingData.template_output)"
+                  >
+                    <template #icon>
+                      <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    </template>
+                    下载填表文件
+                  </n-button>
+                  <!-- 筛选行 JSON 下载 -->
+                  <n-button
+                    v-if="msg.tableFillingData.output_json"
+                    size="tiny"
+                    @click="downloadFilteredJson(msg)"
+                  >
+                    <template #icon>
+                      <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    </template>
+                    下载筛选结果
+                  </n-button>
+                </div>
+              </div>
+            </template>
+
+            <!-- 进度消息显示 -->
+            <template v-else-if="msg.isProgressMessage">
+              <div class="text-sm text-gray-600">
+                {{ msg.content }}
+              </div>
+            </template>
+
             <!-- 普通 Markdown 渲染 -->
             <template v-else>
               <div
@@ -377,12 +461,14 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 进度条消息（仅实体提取模式） -->
-        <div v-if="showProgress && sessionStore.currentMode === 'entity_extraction'" class="flex justify-start">
+        <!-- 进度条消息（实体提取 + 表格填表 + 混合模式） -->
+        <div v-if="showProgress && (sessionStore.currentMode === 'entity_extraction' || sessionStore.currentMode === 'table_filling' || sessionStore.currentMode === 'mixed')" class="flex justify-start">
           <div class="w-1/2 bg-gray-50 rounded-lg px-4 py-3 text-gray-800 shadow-sm">
             <div class="flex items-center justify-between mb-2">
               <div class="flex items-center gap-2">
-                <span class="text-sm font-medium text-gray-700">实体提取中</span>
+                <span class="text-sm font-medium text-gray-700">
+                  {{ sessionStore.currentMode === 'table_filling' ? '表格填表中' : (sessionStore.currentMode === 'mixed' ? '混合处理中' : '实体提取中') }}
+                </span>
                 <span class="text-xs text-gray-400">{{ progressMsg }}</span>
               </div>
               <span v-if="progressVal < 100" class="text-xs text-gray-400 animate-pulse">
@@ -398,6 +484,7 @@ onUnmounted(() => {
               :border-radius="5"
               color="#10b981"
               rail-color="#e5e7eb"
+              :color="sessionStore.currentMode === 'table_filling' ? '#f59e0b' : '#10b981'"
             />
           </div>
         </div>
