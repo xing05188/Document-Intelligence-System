@@ -238,9 +238,12 @@ export const useSessionStore = defineStore('session', () => {
       const data = JSON.parse(event.data)
       if (data.type === 'start') {
         isStreaming.value = true
-        showProgressBar.value = true
-        progressValue.value = 0
-        progressMessage.value = '开始处理...'
+        // 只有实体提取模式才显示进度条
+        if (currentMode.value === 'entity_extraction') {
+          showProgressBar.value = true
+          progressValue.value = 0
+          progressMessage.value = '开始提取...'
+        }
       } else if (data.type === 'progress') {
         progressValue.value = data.progress
         progressMessage.value = data.message
@@ -300,6 +303,9 @@ export const useSessionStore = defineStore('session', () => {
       console.error('WebSocket 错误:', e)
       ws.value = null
       isStreaming.value = false
+    }
+
+    ws.value.onopen = () => {
     }
   }
 
@@ -434,6 +440,10 @@ export const useSessionStore = defineStore('session', () => {
     currentMode,
     isLoading,
     isStreaming,
+    // 进度相关状态
+    progressValue,
+    progressMessage,
+    showProgressBar,
     // 计算属性
     currentSession,
     selectedDataFiles,

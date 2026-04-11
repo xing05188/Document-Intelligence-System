@@ -58,11 +58,10 @@ class WorkflowCoordinator:
             TaskType.TABLE_FILLING: self._table_filling_flow,
         }
 
-    def execute(self, task_spec: TaskSpec, progress_callback: Optional[callable] = None) -> WorkflowResult:
+    def execute(self, task_spec: TaskSpec, progress_callback=None) -> WorkflowResult:
         """
         执行工作流
         根据任务规格选择对应的工作流并执行
-        progress_callback: 进度回调，接收 (progress: int, message: str)
         """
         self.logger.info(f"开始执行任务: {task_spec.task_type.value}")
 
@@ -81,11 +80,7 @@ class WorkflowCoordinator:
             return WorkflowResult(success=False, message=msg)
 
         try:
-            # 传递 progress_callback 给 handler
-            if progress_callback:
-                result = handler(task_spec, progress_callback=progress_callback)
-            else:
-                result = handler(task_spec)
+            result = handler(task_spec, progress_callback=progress_callback)
             persist_workflow_execute_end(
                 task_spec, result.success, result.message, self.config
             )
@@ -174,7 +169,7 @@ class WorkflowCoordinator:
             output_file=task_spec.output_file
         )
 
-    def _entity_extraction_flow(self, task_spec: TaskSpec, progress_callback: Optional[callable] = None) -> WorkflowResult:
+    def _entity_extraction_flow(self, task_spec: TaskSpec, progress_callback=None) -> WorkflowResult:
         """
         实体提取模式
         1. 解析文档
@@ -184,28 +179,21 @@ class WorkflowCoordinator:
         """
         self.logger.info("进入实体提取模式")
 
-        def _pct(p: int, m: str):
-            if progress_callback:
-                progress_callback(p, m)
-
         # 1. 解析非结构化文档
-        _pct(15, "正在解析源文档")
         parsed_content = self.executor.parse_documents(task_spec.source_files)
-        _pct(30, "文档解析完成，开始提取")
 
-        # 2. Agent_B 提取实体
+        # 2. Agent_B 提取实体（带进度回调）
         task_spec.parameters["parsed_content"] = parsed_content
-        _pct(40, "正在使用AI模型提取实体数据")
         extracted_data = self.executor.execute_agent(
             agent_name="agent_b",
-            task_spec=task_spec
+            task_spec=task_spec,
+            progress_callback=progress_callback,
         )
 
         if not extracted_data or not getattr(extracted_data, "success", False):
             err_msg = getattr(extracted_data, "message", "实体提取失败")
             return WorkflowResult(success=False, message=err_msg, data=extracted_data)
 
-        _pct(60, "正在保存提取结果")
         output_filename = (
             Path(task_spec.output_file).name
             if task_spec.output_file
@@ -222,12 +210,10 @@ class WorkflowCoordinator:
 
         # 3. 填入模板
         if task_spec.template_file:
-            _pct(70, "正在填充Excel模板")
             filled_template = self.executor.fill_template(
                 data=extracted_data,
                 template=task_spec.template_file
             )
-            _pct(85, "模板填充完成")
 
             return WorkflowResult(
                 success=True,
