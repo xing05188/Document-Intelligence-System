@@ -229,17 +229,26 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             
             # 发送开始信号
             await manager.send_json(session_id, {"type": "start"})
-            
+
+            # 定义进度回调：接收进度更新并发送给前端
+            async def send_progress(progress: int, message: str):
+                await manager.send_json(session_id, {
+                    "type": "progress",
+                    "progress": progress,
+                    "message": message,
+                })
+
             # 流式调用 Agent 服务（传递文件信息）
             agent_service = AgentService()
             full_response = ""
-            
+
             async for chunk in agent_service.chat_stream(
-                session_id, 
-                user_content, 
+                session_id,
+                user_content,
                 mode,
                 files=files,
                 template_files=template_files,
+                progress_callback=send_progress,
             ):
                 full_response += chunk
                 # 实体提取模式返回的是完整 JSON，标记 result_type
