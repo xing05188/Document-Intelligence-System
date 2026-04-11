@@ -5,6 +5,9 @@ import { useSessionStore } from '../stores/sessionStore'
 import { assistantMarkdownToHtml } from '../utils/markdown'
 
 const sessionStore = useSessionStore()
+const showProgress = computed(() => sessionStore.showProgressBar)
+const progressVal = computed(() => sessionStore.progressValue)
+const progressMsg = computed(() => sessionStore.progressMessage)
 const inputValue = ref('')
 const messagesContainer = ref(null)
 
@@ -119,23 +122,26 @@ onUnmounted(() => {
 
 <template>
   <div class="h-full flex flex-col">
-    <!-- 进度条 -->
-    <div v-if="sessionStore.showProgressBar" class="px-4 pt-3 pb-1">
+    <!-- 进度条（仅实体提取模式） -->
+    <div v-if="showProgress && sessionStore.currentMode === 'entity_extraction'" class="px-4 pt-3 pb-1">
       <div class="bg-gray-100 rounded-lg p-3">
         <div class="flex items-center justify-between mb-2">
-          <span class="text-sm font-medium text-gray-700">处理进度</span>
-          <span class="text-sm text-gray-500">{{ sessionStore.progressValue }}%</span>
+          <span class="text-sm font-medium text-gray-700">实体提取中</span>
+          <span v-if="progressVal < 100" class="text-sm text-gray-400 animate-pulse">
+            处理中...
+          </span>
+          <span v-else class="text-sm text-green-600 font-medium">完成</span>
         </div>
         <n-progress
           type="line"
-          :percentage="sessionStore.progressValue"
+          :percentage="progressVal"
           :show-indicator="false"
           :height="8"
           :border-radius="4"
           color="#10b981"
           rail-color="#e5e7eb"
         />
-        <div class="mt-1 text-xs text-gray-500">{{ sessionStore.progressMessage }}</div>
+        <div class="mt-1 text-xs text-gray-500">{{ progressMsg }}</div>
       </div>
     </div>
     <!-- 消息列表 -->

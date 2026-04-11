@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import queue
+import threading
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
@@ -230,37 +232,60 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             # 发送开始信号
             await manager.send_json(session_id, {"type": "start"})
 
-            # 定义进度回调：接收进度更新并发送给前端
-            async def send_progress(progress: int, message: str):
-                await manager.send_json(session_id, {
+            # 进度队列：线程安全信令，规避 run_coroutine_threadsafe 在主 loop 阻塞时无法执行的问题
+            progress_queue: queue.Queue = queue.Queue()
+
+            def progress_callback(completed: int, total: int, message: str):
+                percent = int(completed / total * 100) if total > 0 else 0
+                progress_queue.put_nowait({
                     "type": "progress",
-                    "progress": progress,
+                    "progress": percent,
                     "message": message,
                 })
 
-            # 流式调用 Agent 服务（传递文件信息）
+            # 在后台线程跑提取，主 loop 保持空闲以处理 WebSocket
             agent_service = AgentService()
             full_response = ""
 
-            async for chunk in agent_service.chat_stream(
-                session_id,
-                user_content,
-                mode,
-                files=files,
-                template_files=template_files,
-                progress_callback=send_progress,
-            ):
-                full_response += chunk
-                # 实体提取模式返回的是完整 JSON，标记 result_type
-                if mode == "entity_extraction":
-                    await manager.send_json(session_id, {"type": "chunk", "content": chunk, "result_type": "entity_extraction"})
-                else:
-                    await manager.send_json(session_id, {"type": "chunk", "content": chunk})
-            
-            # 保存 AI 回复
+            async def drain_queue():
+                """每 50ms 把队列中的进度消息发往 WebSocket"""
+                while not progress_queue.empty():
+                    try:
+                        msg = progress_queue.get_nowait()
+                        # _done 标记仅用于退出循环，不发往 WebSocket
+                        if msg.get("_done"):
+                            continue
+                        await manager.send_json(session_id, msg)
+                    except queue.Empty:
+                        break
+
+            async def extraction_task():
+                nonlocal full_response
+                try:
+                    async for chunk in agent_service.chat_stream(
+                        session_id,
+                        user_content,
+                        mode,
+                        files=files,
+                        template_files=template_files,
+                        progress_callback=progress_callback if mode == "entity_extraction" else None,
+                    ):
+                        full_response += chunk
+                        if mode == "entity_extraction":
+                            await manager.send_json(session_id, {"type": "chunk", "content": chunk, "result_type": "entity_extraction"})
+                        else:
+                            await manager.send_json(session_id, {"type": "chunk", "content": chunk})
+                finally:
+                    progress_queue.put_nowait({"_done": True})
+
+            # 并发：提取跑后台 + 主 loop 轮询进度队列
+            ext_task = asyncio.create_task(extraction_task())
+            while not ext_task.done():
+                await drain_queue()
+                await asyncio.sleep(0.05)
+            await drain_queue()
+
             add_message(session_id, "assistant", full_response, {"mode": mode}, config=cfg)
-            
-            # 发送完成信号，通知前端可以发送下一条消息
             await manager.send_json(session_id, {"type": "done"})
             
     except WebSocketDisconnect:

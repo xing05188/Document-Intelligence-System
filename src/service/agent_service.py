@@ -163,12 +163,11 @@ class AgentService:
         mode: str = "default_conversation",
         files: Optional[List[Dict[str, Any]]] = None,
         template_files: Optional[List[Dict[str, Any]]] = None,
-        progress_callback: Optional[callable] = None,
+        progress_callback=None,
     ) -> AsyncGenerator[str, None]:
         """
         流式聊天响应。
         每次对话都基于当前勾选的文件，支持多轮对话上下文。
-        progress_callback: 进度回调，接收 (progress: int, message: str) 用于通知前端进度更新
         """
         if not mode or not str(mode).strip():
             mode = "default_conversation"
@@ -188,20 +187,19 @@ class AgentService:
                 yield part
             return
 
-        # 实体提取模式：返回完整 JSON（非流式）
+        # 实体提取模式：返回完整 JSON（非流式），支持进度回调
         if mode == "entity_extraction":
             import json
-
-            def _progress(pct: int, msg: str):
-                if progress_callback:
-                    progress_callback(pct, msg)
-                self.logger.info(f"[进度] {pct}% - {msg}")
-
-            _progress(5, "开始实体提取任务")
             task_spec = self._build_task_spec(session_id, mode, content, files or [], template_files)
-            _progress(10, "正在解析源文件")
-            result = self.coordinator.execute(task_spec, progress_callback=_progress)
-            _progress(90, "正在准备结果")
+
+            # 在后台线程跑阻塞的 coordinator.execute，主 event loop 的轮询负责处理进度
+            result = await asyncio.to_thread(
+                self.coordinator.execute,
+                task_spec,
+                progress_callback=progress_callback,
+            )
+            await asyncio.sleep(0)
+
             # result.data 是 WorkflowResult，.data 是 AgentResponse，.data.data 才是字典
             agent_response = result.data if result.data else None
             inner_data = agent_response.data if agent_response else {}
@@ -213,7 +211,6 @@ class AgentService:
                 "chunk_count": inner_data.get("chunk_count") if isinstance(inner_data, dict) else 0,
                 "total_extractions": inner_data.get("total_extractions") if isinstance(inner_data, dict) else 0,
             }
-            _progress(100, "提取完成")
             yield json.dumps(response_data, ensure_ascii=False)
             return
 
