@@ -186,6 +186,25 @@ class AgentService:
                 yield part
             return
 
+        # 实体提取模式：返回完整 JSON（非流式）
+        if mode == "entity_extraction":
+            import json
+            task_spec = self._build_task_spec(session_id, mode, content, files or [], template_files)
+            result = self.coordinator.execute(task_spec)
+            # result.data 是 WorkflowResult，.data 是 AgentResponse，.data.data 才是字典
+            agent_response = result.data if result.data else None
+            inner_data = agent_response.data if agent_response else {}
+            response_data = {
+                "success": result.success,
+                "message": result.message,
+                "entities": inner_data.get("entities") if isinstance(inner_data, dict) else [],
+                "schema": inner_data.get("schema") if isinstance(inner_data, dict) else {},
+                "chunk_count": inner_data.get("chunk_count") if isinstance(inner_data, dict) else 0,
+                "total_extractions": inner_data.get("total_extractions") if isinstance(inner_data, dict) else 0,
+            }
+            yield json.dumps(response_data, ensure_ascii=False)
+            return
+
         # 其他模式：模拟流式输出
         task_spec = self._build_task_spec(session_id, mode, content, files or [], template_files)
         result = self.coordinator.execute(task_spec)
