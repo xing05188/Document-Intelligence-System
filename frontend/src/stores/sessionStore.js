@@ -6,7 +6,6 @@ import fileApi from '../api/files'
 import agentApi from '../api/agents'
 
 export const useSessionStore = defineStore('session', () => {
-  // 状态
   const sessions = ref([])
   const currentSessionId = ref(null)
   const messages = ref([])
@@ -16,13 +15,26 @@ export const useSessionStore = defineStore('session', () => {
   const currentMode = ref('default_conversation')
   const isLoading = ref(false)
   const isStreaming = ref(false)
-  // 进度相关状态
   const progressValue = ref(0)
   const progressMessage = ref('')
   const showProgressBar = ref(false)
   const ws = ref(null)
 
-  // 计算属性
+  let pendingResolve = null
+  let pendingResultData = null
+
+  function needsMixedMode(files) {
+    const hasDoc = files.some(f => /.(docx?|pdf|txt|md)$/i.test(f.file_name))
+    const hasExcel = files.some(f => /.(xlsx?|csv)$/i.test(f.file_name))
+    return hasDoc && hasExcel
+  }
+
+  function getFileCategory(fileName) {
+    if (/.(docx?|pdf|txt|md)$/i.test(fileName)) return 'document'
+    if (/.(xlsx?|csv)$/i.test(fileName)) return 'excel'
+    return 'unknown'
+  }
+
   const currentSession = computed(() =>
     sessions.value.find(s => s.session_id === currentSessionId.value)
   )
@@ -35,18 +47,17 @@ export const useSessionStore = defineStore('session', () => {
     templateFiles.value.filter(f => f.is_selected)
   )
 
-  // 模式配置
   const modeConfig = {
     'default_conversation': { requiresData: false, requiresTemplate: false },
     'document_understanding': { requiresData: true, requiresTemplate: false },
     'document_editing': { requiresData: true, requiresTemplate: false },
     'entity_extraction': { requiresData: true, requiresTemplate: null },
     'table_filling': { requiresData: true, requiresTemplate: true },
+    'mixed': { requiresData: true, requiresTemplate: null },
   }
 
   const currentModeConfig = computed(() => modeConfig[currentMode.value] || modeConfig['default_conversation'])
 
-  // Actions
   async function loadSessions() {
     try {
       const res = await sessionApi.list()
@@ -58,7 +69,6 @@ export const useSessionStore = defineStore('session', () => {
 
   async function createSession() {
     try {
-      // 断开旧连接
       disconnectWebSocket()
       const res = await sessionApi.create({ title: '新会话', current_mode: currentMode.value })
       sessions.value.unshift(res)
@@ -69,17 +79,14 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   async function selectSession(sessionId) {
-    // 断开旧连接
     disconnectWebSocket()
     currentSessionId.value = sessionId
     await loadMessages(sessionId)
     await loadFiles(sessionId)
-    // 更新当前模式
     const session = sessions.value.find(s => s.session_id === sessionId)
     if (session) {
       currentMode.value = session.current_mode || 'default_conversation'
     }
-    // 连接 WebSocket
     connectWebSocket()
   }
 
@@ -120,13 +127,13 @@ export const useSessionStore = defineStore('session', () => {
     if (currentSessionId.value) {
       await sessionApi.update(currentSessionId.value, { current_mode: mode })
     }
-    // 追加系统消息，出现在上一次消息下方
     const modeNames = {
       'default_conversation': '默认对话',
       'document_understanding': '文档理解',
       'document_editing': '文档编辑',
       'entity_extraction': '实体提取',
       'table_filling': '表格填表',
+      'mixed': '混合模式',
     }
     messages.value.push({
       id: Date.now(),
@@ -168,10 +175,15 @@ export const useSessionStore = defineStore('session', () => {
     if (!currentSessionId.value) return
     try {
       const res = await fileApi.upload(currentSessionId.value, file, fileType)
+      // 防止重复添加（根据 file_id 或 file_path 去重）
       if (fileType === 'data') {
-        dataFiles.value.unshift(res)
+        if (!dataFiles.value.some(f => f.id === res.id)) {
+          dataFiles.value.unshift(res)
+        }
       } else {
-        templateFiles.value.unshift(res)
+        if (!templateFiles.value.some(f => f.id === res.id)) {
+          templateFiles.value.unshift(res)
+        }
       }
     } catch (e) {
       console.error('上传文件失败:', e)
@@ -241,7 +253,6 @@ export const useSessionStore = defineStore('session', () => {
     })
   }
 
-  // WebSocket 流式聊天
   function connectWebSocket() {
     if (!currentSessionId.value) return
     disconnectWebSocket()
@@ -252,17 +263,18 @@ export const useSessionStore = defineStore('session', () => {
       const data = JSON.parse(event.data)
       if (data.type === 'start') {
         isStreaming.value = true
-        // 只有实体提取模式才显示进度条
-        if (currentMode.value === 'entity_extraction') {
+        // 同时检查 result_type 和 mode 字段（后端可能发送不同的字段名）
+        const isEntityMode = data.result_type === 'entity_extraction' || data.mode === 'entity_extraction'
+        const isTableMode = data.result_type === 'table_filling' || data.mode === 'table_filling'
+        if (isEntityMode || isTableMode) {
           showProgressBar.value = true
           progressValue.value = 0
-          progressMessage.value = '开始提取...'
+          progressMessage.value = isTableMode ? '开始筛选数据...' : '开始提取...'
         }
       } else if (data.type === 'progress') {
         progressValue.value = data.progress
         progressMessage.value = data.message
       } else if (data.type === 'chunk') {
-        // 实体提取模式：content 是 JSON 字符串，解析后存入 extractionData
         if (data.result_type === 'entity_extraction') {
           try {
             const parsed = JSON.parse(data.content)
@@ -278,11 +290,32 @@ export const useSessionStore = defineStore('session', () => {
                 extractionData: parsed,
               })
             }
+            // 保存实体提取数据到 pendingResultData
+            pendingResultData = { extractionData: parsed }
           } catch (e) {
             console.error('解析实体提取结果失败:', e)
           }
+        } else if (data.result_type === 'table_filling') {
+          try {
+            const parsed = JSON.parse(data.content)
+            const lastMsg = messages.value[messages.value.length - 1]
+            if (lastMsg && lastMsg.role === 'assistant') {
+              lastMsg.tableFillingData = parsed
+            } else {
+              messages.value.push({
+                id: Date.now(),
+                role: 'assistant',
+                content: parsed.message || '',
+                created_at: new Date().toISOString(),
+                tableFillingData: parsed,
+              })
+            }
+            // 保存表格填表数据到 pendingResultData
+            pendingResultData = { tableFillingData: parsed }
+          } catch (e) {
+            console.error('解析表格填表结果失败:', e)
+          }
         } else {
-          // 普通文本追加到最后一条助手消息
           const lastMsg = messages.value[messages.value.length - 1]
           if (lastMsg && lastMsg.role === 'assistant') {
             lastMsg.content += data.content
@@ -300,11 +333,31 @@ export const useSessionStore = defineStore('session', () => {
         showProgressBar.value = false
         progressValue.value = 100
         progressMessage.value = '处理完成'
+        if (pendingResolve) {
+          // 找到最后一个包含提取结果的消息（跳过进度消息）
+          let lastMsg = null
+          for (let i = messages.value.length - 1; i >= 0; i--) {
+            const msg = messages.value[i]
+            if (msg.isProgressMessage) continue
+            if (msg.extractionData || msg.tableFillingData) {
+              lastMsg = msg
+              break
+            }
+          }
+          pendingResolve({ success: true, resp: pendingResultData })
+          pendingResolve = null
+          pendingResultData = null
+        }
       } else if (data.type === 'error') {
         const errorMsg = typeof data.message === 'string' ? data.message : JSON.stringify(data.message)
         console.error('流式错误:', errorMsg)
         isStreaming.value = false
         showProgressBar.value = false
+        if (pendingResolve) {
+          pendingResolve({ success: false, error: errorMsg })
+          pendingResolve = null
+          pendingResultData = null
+        }
       }
     }
 
@@ -331,18 +384,18 @@ export const useSessionStore = defineStore('session', () => {
     isStreaming.value = false
   }
 
-  // 清除所有已勾选的文件（发送消息后调用）
-  // 分两阶段：先立即更新本地 UI，后台同步数据库
+  function downloadFile(path) {
+    if (!path) return
+    const url = `/api/files/download?path=${encodeURIComponent(path)}`
+    window.open(url, '_blank')
+  }
+
   function clearAllSelectedFiles() {
-    // 第一阶段：立即清除本地勾选状态（同步执行，UI 无延迟）
     dataFiles.value.forEach(f => { f.is_selected = false })
     templateFiles.value.forEach(f => { f.is_selected = false })
-
-    // 第二阶段：后台静默同步到数据库（异步，不阻塞）
     syncFileSelectionToServer()
   }
 
-  // 同步文件勾选状态到后端数据库
   async function syncFileSelectionToServer() {
     try {
       const tasks = []
@@ -360,7 +413,6 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
-  // 获取当前勾选的文件列表（用于发送给后端）
   function getSelectedFilesPayload() {
     const dataFiles = selectedDataFiles.value.map(f => ({
       file_id: f.id,
@@ -379,23 +431,55 @@ export const useSessionStore = defineStore('session', () => {
     return { files: dataFiles, template_files: templateFiles }
   }
 
+  async function mergeMixedEntities(results) {
+    const allEntities = []
+
+    for (const r of results) {
+      if (r.type === 'entity_extraction') {
+        const entities = r.extractionData?.entities || []
+        for (const entity of entities) {
+          allEntities.push(entity)
+        }
+      } else if (r.type === 'table_filling') {
+        const outputJson = r.tableFillingData?.output_json
+        const mapping = r.tableFillingData?.template_mapping || {}
+        if (outputJson) {
+          try {
+            const url = `/api/files/download?path=${encodeURIComponent(outputJson)}`
+            const resp = await fetch(url)
+            const rows = await resp.json()
+
+            for (const row of rows) {
+              const entity = {}
+              for (const [tplCol, srcCol] of Object.entries(mapping)) {
+                const val = row[srcCol]
+                entity[tplCol] = Array.isArray(val) ? val : [val, '']
+              }
+              allEntities.push(entity)
+            }
+          } catch (e) {
+            console.error('加载 output_json 失败:', e)
+          }
+        }
+      }
+    }
+
+    return allEntities
+  }
+
   async function sendMessage(content) {
     if (!content.trim()) return
 
-    // 没有会话时自动创建
     if (!currentSessionId.value) {
       await createSession()
     }
 
     const sessionId = currentSessionId.value
-
-    // 获取当前勾选的文件（和消息一起发送；需在 push 前快照，供 UI 展示附件卡片）
     const { files, template_files } = getSelectedFilesPayload()
     const userMetadata = {}
     if (files.length > 0) userMetadata.files = files
     if (template_files.length > 0) userMetadata.template_files = template_files
 
-    // 添加用户消息（metadata 与后端持久化结构一致，用于「文件 + 文字」同条展示）
     messages.value.push({
       id: Date.now(),
       role: 'user',
@@ -404,37 +488,141 @@ export const useSessionStore = defineStore('session', () => {
       metadata: Object.keys(userMetadata).length ? userMetadata : undefined,
     })
 
-    // 若有 WebSocket，等待连接就绪后走流式
-    const canStream = await waitForWebSocketOpen()
-    if (ws.value && ws.value.readyState === WebSocket.OPEN && canStream) {
-      ws.value.send(JSON.stringify({
-        content: content.trim(),
-        mode: currentMode.value,
-        files: files,
-        template_files: template_files,
-      }))
-      // 发送消息后立即清除勾选 UI（不等 AI 响应）
+    // 混合模式：始终使用混合模式逻辑，不管文件类型组合
+    if (currentMode.value === 'mixed') {
+      const docFiles = files.filter(f => getFileCategory(f.file_name) === 'document')
+      const excelFiles = files.filter(f => getFileCategory(f.file_name) === 'excel')
+
+      if (docFiles.length === 0 && excelFiles.length === 0) {
+        isStreaming.value = true
+        try {
+          await messageApi.send(sessionId, {
+            content: content.trim(),
+            mode: 'mixed',
+            files: files,
+            template_files: template_files,
+          })
+          await loadMessages(sessionId)
+        } catch (e) {
+          console.error('发送消息失败:', e)
+        } finally {
+          isStreaming.value = false
+        }
+        return
+      }
+
+      const taskList = []
+      docFiles.forEach(f => taskList.push({ file: f, mode: 'entity_extraction' }))
+      excelFiles.forEach(f => taskList.push({ file: f, mode: 'table_filling' }))
+
+      const results = []
+      const originalMode = currentMode.value
+
+      for (let i = 0; i < taskList.length; i++) {
+        const task = taskList[i]
+        const displayMode = task.mode
+        const taskTypeName = task.mode === 'entity_extraction' ? '实体提取任务' : '表格处理任务'
+
+        console.log(`[混合模式] 任务 ${i + 1}/${taskList.length} -> ${task.mode === 'entity_extraction' ? '实体提取' : '表格填表'} | 文件: ${task.file.file_name}`)
+
+        // 更新进度条显示当前任务
+        showProgressBar.value = true
+        progressValue.value = 0
+        const currentProgressMsg = `处理文件 ${i + 1}/${taskList.length} - ${taskTypeName}: ${task.file.file_name}`
+        progressMessage.value = currentProgressMsg
+
+        messages.value.push({
+          id: Date.now() + i,
+          role: 'assistant',
+          content: currentProgressMsg,
+          created_at: new Date().toISOString(),
+          mixedSource: 'single',
+          mixedTaskIndex: i,
+          isProgressMessage: true,
+        })
+
+        const result = await new Promise((resolve) => {
+          pendingResolve = resolve
+          ws.value.send(JSON.stringify({
+            content: content.trim(),
+            mode: task.mode,
+            files: [{ ...task.file, is_selected: true }],
+            template_files: template_files,
+          }))
+        })
+
+        results.push({ task, ...result })
+      }
+
+      // 所有任务完成后，清除选中状态
       clearAllSelectedFiles()
-    } else {
-      // 非流式
-      isStreaming.value = true
-      try {
-        await messageApi.send(sessionId, {
+
+      currentMode.value = originalMode
+
+      // 如果只有一个文件，不需要合并，直接用已有消息的结果
+      if (taskList.length === 1) {
+        console.log('[混合模式] 单文件处理完成，直接使用已有结果')
+        return
+      }
+
+      // 多文件才需要合并结果
+      const successfulResults = results.filter(r => r.success)
+      const allEntities = await mergeMixedEntities(
+        successfulResults.map(r => ({
+          type: r.task.mode === 'entity_extraction' ? 'entity_extraction' : 'table_filling',
+          ...r.resp,
+        }))
+      )
+
+      const firstEntityResult = successfulResults.find(r => r.task.mode === 'entity_extraction')
+      const schema = firstEntityResult?.extractionData?.schema || { fields: Object.keys(allEntities[0] || {}) }
+
+      messages.value.push({
+        id: Date.now() + 999,
+        role: 'assistant',
+        content: '',
+        created_at: new Date().toISOString(),
+        mixedSource: 'merged',
+        extractionData: {
+          message: `混合模式完成，共 ${allEntities.length} 条记录（来自 ${successfulResults.length} 个文件）`,
+          entities: allEntities,
+          schema: schema,
+        },
+      })
+      return
+    }
+
+    // 非混合模式：根据文件类型自动判断是否走混合逻辑
+    if (!needsMixedMode(files)) {
+      const canStream = await waitForWebSocketOpen()
+      if (ws.value && ws.value.readyState === WebSocket.OPEN && canStream) {
+        ws.value.send(JSON.stringify({
           content: content.trim(),
           mode: currentMode.value,
           files: files,
           template_files: template_files,
-        })
-        await loadMessages(sessionId)
-      } catch (e) {
-        console.error('发送消息失败:', e)
-      } finally {
-        isStreaming.value = false
+        }))
+        clearAllSelectedFiles()
+      } else {
+        isStreaming.value = true
+        try {
+          await messageApi.send(sessionId, {
+            content: content.trim(),
+            mode: currentMode.value,
+            files: files,
+            template_files: template_files,
+          })
+          await loadMessages(sessionId)
+        } catch (e) {
+          console.error('发送消息失败:', e)
+        } finally {
+          isStreaming.value = false
+        }
       }
+      return
     }
   }
 
-  // 初始化
   async function init() {
     await loadSessions()
     await loadModes()
@@ -444,7 +632,6 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   return {
-    // 状态
     sessions,
     currentSessionId,
     messages,
@@ -454,16 +641,13 @@ export const useSessionStore = defineStore('session', () => {
     currentMode,
     isLoading,
     isStreaming,
-    // 进度相关状态
     progressValue,
     progressMessage,
     showProgressBar,
-    // 计算属性
     currentSession,
     selectedDataFiles,
     selectedTemplateFiles,
     currentModeConfig,
-    // Actions
     init,
     loadSessions,
     createSession,
@@ -471,6 +655,9 @@ export const useSessionStore = defineStore('session', () => {
     deleteSession,
     updateSessionTitle,
     switchMode,
+    loadMessages,
+    loadModes,
+    loadFiles,
     uploadFile,
     toggleFileSelection,
     deleteFile,
@@ -480,5 +667,6 @@ export const useSessionStore = defineStore('session', () => {
     getSelectedFilesPayload,
     connectWebSocket,
     disconnectWebSocket,
+    downloadFile,
   }
 })

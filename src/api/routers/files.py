@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from config import load_config
@@ -26,9 +27,10 @@ UPLOAD_DIR = Path("workspace/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
-class FileResponse(BaseModel):
+class SessionFile(BaseModel):
     id: int
     file_name: str
+    file_path: str
     file_type: str
     file_size: int
     is_selected: bool
@@ -36,8 +38,8 @@ class FileResponse(BaseModel):
 
 
 class FileListResponse(BaseModel):
-    data_files: List[FileResponse]
-    template_files: List[FileResponse]
+    data_files: List[SessionFile]
+    template_files: List[SessionFile]
 
 
 class FileSelectionRequest(BaseModel):
@@ -49,6 +51,7 @@ def _file_to_dict(f) -> Dict[str, Any]:
     return {
         "id": f.id,
         "file_name": f.file_name,
+        "file_path": f.file_path,
         "file_type": f.file_type,
         "file_size": f.file_size,
         "is_selected": f.is_selected,
@@ -74,7 +77,7 @@ async def list_files(session_id: str):
     return FileListResponse(data_files=data_files, template_files=template_files)
 
 
-@router.post("", response_model=FileResponse)
+@router.post("", response_model=SessionFile)
 async def upload_file(
     session_id: str,
     file: UploadFile,
@@ -189,5 +192,24 @@ async def download_file(session_id: str, file_id: int):
     return FileResponse(
         path=str(file_path),
         filename=file_info.file_name,
+        media_type="application/octet-stream",
+    )
+
+
+# ============ 通用路径下载（本地测试用）============
+# 不依赖 session_id，用于下载 Agent 生成的 _filled.xlsx / _filtered_rows.json 等文件
+
+download_router = APIRouter(prefix="/api/files", tags=["文件下载"])
+
+
+@download_router.get("/download")
+async def download_by_path(path: str):
+    """根据文件绝对路径下载（本地测试用）"""
+    file_path = Path(path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return FileResponse(
+        path=str(file_path),
+        filename=file_path.name,
         media_type="application/octet-stream",
     )

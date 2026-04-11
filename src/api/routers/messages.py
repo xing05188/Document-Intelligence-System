@@ -195,25 +195,57 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             client_files = data.get("files") or []
             client_templates = data.get("template_files") or []
 
-            # 实体提取模式：必须使用数据库中的真实 file_path
-            # 因为前端发送的文件可能没有 file_path
+            # 实体提取模式
             if mode == "entity_extraction":
                 db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
-                # 合并：使用前端传来的勾选状态，用数据库中的 file_path
+                db_path_map = {f.get('file_name'): f for f in db_data_files}
+                db_tpl_path_map = {f.get('file_name'): f for f in db_template_files}
                 if client_files:
-                    # 构建 file_name -> file_path 映射
-                    db_path_map = {f.get('file_name'): f.get('file_path') for f in db_data_files}
+                    files = []
                     for cf in client_files:
-                        if not cf.get('file_path') and cf.get('file_name') in db_path_map:
-                            cf['file_path'] = db_path_map[cf['file_name']]
+                        matched = db_path_map.get(cf.get('file_name'))
+                        if matched:
+                            files.append(matched)
+                        elif cf.get('file_path'):
+                            # 前端直接传了 file_path（混合模式串行处理，清除选中状态后用）
+                            files.append(cf)
+                else:
+                    files = db_data_files
                 if client_templates:
-                    db_tpl_path_map = {f.get('file_name'): f.get('file_path') for f in db_template_files}
+                    template_files = []
                     for ct in client_templates:
-                        if not ct.get('file_path') and ct.get('file_name') in db_tpl_path_map:
-                            ct['file_path'] = db_tpl_path_map[ct['file_name']]
-                # 始终以数据库路径为准（最可靠）
-                files = db_data_files if db_data_files else client_files
-                template_files = db_template_files if db_template_files else client_templates
+                        matched = db_tpl_path_map.get(ct.get('file_name'))
+                        if matched:
+                            template_files.append(matched)
+                        elif ct.get('file_path'):
+                            template_files.append(ct)
+                else:
+                    template_files = db_template_files
+            elif mode == "table_filling":
+                # 表格填表模式
+                db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
+                db_path_map = {f.get('file_name'): f for f in db_data_files}
+                db_tpl_path_map = {f.get('file_name'): f for f in db_template_files}
+                if client_files:
+                    files = []
+                    for cf in client_files:
+                        matched = db_path_map.get(cf.get('file_name'))
+                        if matched:
+                            files.append(matched)
+                        elif cf.get('file_path'):
+                            files.append(cf)
+                else:
+                    files = db_data_files
+                if client_templates:
+                    template_files = []
+                    for ct in client_templates:
+                        matched = db_tpl_path_map.get(ct.get('file_name'))
+                        if matched:
+                            template_files.append(matched)
+                        elif ct.get('file_path'):
+                            template_files.append(ct)
+                else:
+                    template_files = db_template_files
             elif client_files or client_templates:
                 files = client_files
                 template_files = client_templates
@@ -230,7 +262,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             add_message(session_id, "user", user_content, user_meta, config=cfg)
             
             # 发送开始信号
-            await manager.send_json(session_id, {"type": "start"})
+            await manager.send_json(session_id, {"type": "start", "mode": mode})
 
             # 进度队列：线程安全信令，规避 run_coroutine_threadsafe 在主 loop 阻塞时无法执行的问题
             progress_queue: queue.Queue = queue.Queue()
@@ -268,11 +300,13 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         mode,
                         files=files,
                         template_files=template_files,
-                        progress_callback=progress_callback if mode == "entity_extraction" else None,
+                        progress_callback=progress_callback if mode in ("entity_extraction", "table_filling") else None,
                     ):
                         full_response += chunk
                         if mode == "entity_extraction":
                             await manager.send_json(session_id, {"type": "chunk", "content": chunk, "result_type": "entity_extraction"})
+                        elif mode == "table_filling":
+                            await manager.send_json(session_id, {"type": "chunk", "content": chunk, "result_type": "table_filling"})
                         else:
                             await manager.send_json(session_id, {"type": "chunk", "content": chunk})
                 finally:

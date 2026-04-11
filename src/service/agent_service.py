@@ -214,6 +214,38 @@ class AgentService:
             yield json.dumps(response_data, ensure_ascii=False)
             return
 
+        # 表格填表模式：返回结构化 JSON（非流式）
+        if mode == "table_filling":
+            import json
+            task_spec = self._build_task_spec(session_id, mode, content, files or [], template_files)
+
+            result = await asyncio.to_thread(
+                self.coordinator.execute,
+                task_spec,
+                progress_callback=progress_callback,
+            )
+            await asyncio.sleep(0)
+
+            agent_response = result.data if result.data else None
+            inner_data = agent_response.data if agent_response else {}
+            response_data = {
+                "success": result.success,
+                "message": result.message,
+                "status": inner_data.get("status") if isinstance(inner_data, dict) else "completed",
+                "excel_path": inner_data.get("excel_path") if isinstance(inner_data, dict) else None,
+                "output_json": inner_data.get("output_json") if isinstance(inner_data, dict) else None,
+                "total_rows": inner_data.get("total_rows") if isinstance(inner_data, dict) else 0,
+                "matched_rows": inner_data.get("matched_rows") if isinstance(inner_data, dict) else 0,
+                "used_plan": inner_data.get("used_plan") if isinstance(inner_data, dict) else None,
+                "plan_source": inner_data.get("plan_source") if isinstance(inner_data, dict) else None,
+                "template_filled": inner_data.get("template_filled") if isinstance(inner_data, dict) else False,
+                "template_output": inner_data.get("template_output") if isinstance(inner_data, dict) else None,
+                "template_mapping": inner_data.get("template_mapping") if isinstance(inner_data, dict) else {},
+                "multi_table_results": inner_data.get("multi_table_results") if isinstance(inner_data, dict) else None,
+            }
+            yield json.dumps(response_data, ensure_ascii=False)
+            return
+
         # 其他模式：模拟流式输出
         task_spec = self._build_task_spec(session_id, mode, content, files or [], template_files)
         result = self.coordinator.execute(task_spec)
@@ -383,6 +415,26 @@ class AgentService:
         """
         task_spec = self._build_task_spec(session_id, mode, content, files, template_files)
         result = self.coordinator.execute(task_spec)
+
+        # 表格填表模式：返回结构化字典
+        if mode == "table_filling":
+            agent_response = result.data if result.data else None
+            inner_data = agent_response.data if agent_response else {}
+            return {
+                "success": result.success,
+                "message": result.message,
+                "status": inner_data.get("status") if isinstance(inner_data, dict) else "completed",
+                "excel_path": inner_data.get("excel_path") if isinstance(inner_data, dict) else None,
+                "output_json": inner_data.get("output_json") if isinstance(inner_data, dict) else None,
+                "total_rows": inner_data.get("total_rows") if isinstance(inner_data, dict) else 0,
+                "matched_rows": inner_data.get("matched_rows") if isinstance(inner_data, dict) else 0,
+                "used_plan": inner_data.get("used_plan") if isinstance(inner_data, dict) else None,
+                "plan_source": inner_data.get("plan_source") if isinstance(inner_data, dict) else None,
+                "template_filled": inner_data.get("template_filled") if isinstance(inner_data, dict) else False,
+                "template_output": inner_data.get("template_output") if isinstance(inner_data, dict) else None,
+                "template_mapping": inner_data.get("template_mapping") if isinstance(inner_data, dict) else {},
+                "multi_table_results": inner_data.get("multi_table_results") if isinstance(inner_data, dict) else None,
+            }
 
         return {
             "success": result.success,
