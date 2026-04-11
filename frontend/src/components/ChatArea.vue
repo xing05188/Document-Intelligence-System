@@ -1,12 +1,15 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { NInput, NButton, NScrollbar } from 'naive-ui'
+import { NInput, NButton, NScrollbar, NTag, NProgress } from 'naive-ui'
 import { useSessionStore } from '../stores/sessionStore'
 import { assistantMarkdownToHtml } from '../utils/markdown'
 
 const sessionStore = useSessionStore()
 const inputValue = ref('')
 const messagesContainer = ref(null)
+
+// 实体提取表格最大显示行数
+const MAX_TABLE_ROWS = 10
 
 // 滚动到底部
 function scrollToBottom() {
@@ -67,12 +70,43 @@ function renderAssistant(msg) {
   return assistantMarkdownToHtml(msg.content)
 }
 
+// 获取表格显示的行数（最多10行）
+function getTableRows(entities) {
+  if (!entities || !Array.isArray(entities)) return []
+  return entities.slice(0, MAX_TABLE_ROWS)
+}
+
+// 获取表格列名
+function getTableColumns(schema) {
+  if (!schema || !schema.fields) return []
+  return schema.fields
+}
+
+// 获取实体数据总条数
+function getTotalCount(extractionData) {
+  if (!extractionData || !extractionData.entities) return 0
+  return extractionData.entities.length
+}
+
 const showStreamingPlaceholder = computed(() => {
   if (!sessionStore.isStreaming) return false
   const list = sessionStore.messages
   const last = list[list.length - 1]
   return !last || last.role !== 'assistant'
 })
+
+// 判断消息是否需要渲染为实体提取结果表格
+function isEntityExtractionMessage(msg) {
+  return msg.role === 'assistant' && msg.extractionData && msg.extractionData.entities
+}
+
+// 渲染单元格值（处理数组格式 [值, 位置]）
+function renderCellValue(rawValue) {
+  if (Array.isArray(rawValue)) {
+    return rawValue[0] || ''
+  }
+  return rawValue || ''
+}
 
 onMounted(() => {
   sessionStore.connectWebSocket()
@@ -85,6 +119,25 @@ onUnmounted(() => {
 
 <template>
   <div class="h-full flex flex-col">
+    <!-- 进度条 -->
+    <div v-if="sessionStore.showProgressBar" class="px-4 pt-3 pb-1">
+      <div class="bg-gray-100 rounded-lg p-3">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-sm font-medium text-gray-700">处理进度</span>
+          <span class="text-sm text-gray-500">{{ sessionStore.progressValue }}%</span>
+        </div>
+        <n-progress
+          type="line"
+          :percentage="sessionStore.progressValue"
+          :show-indicator="false"
+          :height="8"
+          :border-radius="4"
+          color="#10b981"
+          rail-color="#e5e7eb"
+        />
+        <div class="mt-1 text-xs text-gray-500">{{ sessionStore.progressMessage }}</div>
+      </div>
+    </div>
     <!-- 消息列表 -->
     <n-scrollbar ref="messagesContainer" class="flex-1 p-4">
       <!-- 空状态 -->
@@ -161,10 +214,61 @@ onUnmounted(() => {
             v-else
             class="max-w-2xl rounded-lg bg-gray-100 px-4 py-2 text-gray-800"
           >
-            <div
-              class="assistant-md break-words text-left"
-              v-html="renderAssistant(msg)"
-            />
+            <!-- 实体提取结果表格 -->
+            <template v-if="isEntityExtractionMessage(msg)">
+              <!-- 摘要信息 -->
+              <div class="mb-3">
+                <n-tag type="success" size="small">实体提取</n-tag>
+                <span class="ml-2 text-sm text-gray-600">{{ msg.extractionData.message }}</span>
+              </div>
+              <!-- 数据表格 -->
+              <div class="overflow-x-auto">
+                <table class="min-w-full text-sm border-collapse border border-gray-300">
+                  <thead>
+                    <tr class="bg-gray-200">
+                      <th class="border border-gray-300 px-2 py-1 text-left font-medium">#</th>
+                      <th
+                        v-for="col in getTableColumns(msg.extractionData.schema)"
+                        :key="col"
+                        class="border border-gray-300 px-2 py-1 text-left font-medium"
+                      >
+                        {{ col }}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="(row, idx) in getTableRows(msg.extractionData.entities)"
+                      :key="idx"
+                      class="hover:bg-gray-50"
+                    >
+                      <td class="border border-gray-300 px-2 py-1 text-gray-400">{{ idx + 1 }}</td>
+                      <td
+                        v-for="col in getTableColumns(msg.extractionData.schema)"
+                        :key="col"
+                        class="border border-gray-300 px-2 py-1"
+                      >
+                        {{ renderCellValue(row[col]) }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <!-- 超过10行的提示 -->
+              <div
+                v-if="getTotalCount(msg.extractionData) > MAX_TABLE_ROWS"
+                class="mt-2 text-xs text-gray-500"
+              >
+                共 {{ getTotalCount(msg.extractionData) }} 条记录，仅显示前 {{ MAX_TABLE_ROWS }} 条。完整数据已保存。
+              </div>
+            </template>
+            <!-- 普通 Markdown 渲染 -->
+            <template v-else>
+              <div
+                class="assistant-md break-words text-left"
+                v-html="renderAssistant(msg)"
+              />
+            </template>
             <div class="mt-1 text-xs text-gray-400">
               {{ formatTime(msg.created_at) }}
             </div>

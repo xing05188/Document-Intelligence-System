@@ -16,6 +16,10 @@ export const useSessionStore = defineStore('session', () => {
   const currentMode = ref('default_conversation')
   const isLoading = ref(false)
   const isStreaming = ref(false)
+  // 进度相关状态
+  const progressValue = ref(0)
+  const progressMessage = ref('')
+  const showProgressBar = ref(false)
   const ws = ref(null)
 
   // 计算属性
@@ -234,24 +238,56 @@ export const useSessionStore = defineStore('session', () => {
       const data = JSON.parse(event.data)
       if (data.type === 'start') {
         isStreaming.value = true
+        showProgressBar.value = true
+        progressValue.value = 0
+        progressMessage.value = '开始处理...'
+      } else if (data.type === 'progress') {
+        progressValue.value = data.progress
+        progressMessage.value = data.message
       } else if (data.type === 'chunk') {
-        // 追加到最后一条助手消息
-        const lastMsg = messages.value[messages.value.length - 1]
-        if (lastMsg && lastMsg.role === 'assistant') {
-          lastMsg.content += data.content
+        // 实体提取模式：content 是 JSON 字符串，解析后存入 extractionData
+        if (data.result_type === 'entity_extraction') {
+          try {
+            const parsed = JSON.parse(data.content)
+            const lastMsg = messages.value[messages.value.length - 1]
+            if (lastMsg && lastMsg.role === 'assistant') {
+              lastMsg.extractionData = parsed
+            } else {
+              messages.value.push({
+                id: Date.now(),
+                role: 'assistant',
+                content: '',
+                created_at: new Date().toISOString(),
+                extractionData: parsed,
+              })
+            }
+          } catch (e) {
+            console.error('解析实体提取结果失败:', e)
+          }
         } else {
-          messages.value.push({
-            id: Date.now(),
-            role: 'assistant',
-            content: data.content,
-            created_at: new Date().toISOString(),
-          })
+          // 普通文本追加到最后一条助手消息
+          const lastMsg = messages.value[messages.value.length - 1]
+          if (lastMsg && lastMsg.role === 'assistant') {
+            lastMsg.content += data.content
+          } else {
+            messages.value.push({
+              id: Date.now(),
+              role: 'assistant',
+              content: data.content,
+              created_at: new Date().toISOString(),
+            })
+          }
         }
       } else if (data.type === 'done') {
         isStreaming.value = false
+        showProgressBar.value = false
+        progressValue.value = 100
+        progressMessage.value = '处理完成'
       } else if (data.type === 'error') {
-        console.error('流式错误:', data.message)
+        const errorMsg = typeof data.message === 'string' ? data.message : JSON.stringify(data.message)
+        console.error('流式错误:', errorMsg)
         isStreaming.value = false
+        showProgressBar.value = false
       }
     }
 
