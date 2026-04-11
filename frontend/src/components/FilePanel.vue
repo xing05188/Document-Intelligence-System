@@ -56,6 +56,8 @@ function getFileTypeTag(type) {
 }
 
 async function handleUpload(file, fileType) {
+  // 防止重复上传
+  if (isUploading.value) return
   // 无会话时自动创建（沿用当前选中的模式）
   if (!sessionStore.currentSessionId) {
     await sessionStore.createSession()
@@ -97,6 +99,7 @@ async function handleUpload(file, fileType) {
           :show-file-list="false"
           :disabled="isUploading"
           accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.md"
+          multiple
         >
           <n-button size="small" :loading="isUploading">+ 上传数据</n-button>
         </n-upload>
@@ -146,6 +149,7 @@ async function handleUpload(file, fileType) {
             :show-file-list="false"
             :disabled="isUploading"
             accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.md"
+            multiple
           >
             <n-button size="small" :loading="isUploading">+ 上传模板</n-button>
           </n-upload>
