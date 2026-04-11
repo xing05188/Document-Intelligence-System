@@ -179,6 +179,10 @@ class WorkflowCoordinator:
         """
         self.logger.info("进入实体提取模式")
 
+        # 文档解析完毕后立即通知前端，让用户知道任务已启动
+        if progress_callback:
+            progress_callback(0, 1, "文档解析完成，开始提取...")
+
         # 1. 解析非结构化文档
         parsed_content = self.executor.parse_documents(task_spec.source_files)
 
