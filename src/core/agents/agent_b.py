@@ -206,6 +206,10 @@ class AgentB(BaseAgent):
         chunk_size = int(os.getenv("EXTRACTION_CHUNK_SIZE", "500"))
         chunks_with_offset = split_text_semantic_with_offset(input_text, chunk_size)
 
+        # 立即通知前端任务已启动（此时文本已分块完毕，后端开始并发抽取）
+        if progress_callback:
+            progress_callback(0, len(chunks_with_offset), f"开始提取 {len(chunks_with_offset)} 个分块...")
+
         prompt_description = f"""
 从文本中提取以下字段：
 {fields}

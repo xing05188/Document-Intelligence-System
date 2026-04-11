@@ -120,6 +120,20 @@ export const useSessionStore = defineStore('session', () => {
     if (currentSessionId.value) {
       await sessionApi.update(currentSessionId.value, { current_mode: mode })
     }
+    // 追加系统消息，出现在上一次消息下方
+    const modeNames = {
+      'default_conversation': '默认对话',
+      'document_understanding': '文档理解',
+      'document_editing': '文档编辑',
+      'entity_extraction': '实体提取',
+      'table_filling': '表格填表',
+    }
+    messages.value.push({
+      id: Date.now(),
+      role: 'system',
+      content: `已切换至「${modeNames[mode] || mode}」模式`,
+      created_at: new Date().toISOString(),
+    })
   }
 
   async function loadMessages(sessionId) {
