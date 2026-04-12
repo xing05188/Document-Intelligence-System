@@ -8,4 +8,8 @@ export default {
   execute(task) {
     return client.post('/agents/execute', task)
   },
+
+  mixedFill(payload) {
+    return client.post('/agents/mixed-fill', payload)
+  },
 }
