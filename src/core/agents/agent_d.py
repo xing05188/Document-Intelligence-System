@@ -410,7 +410,8 @@ class AgentB(BaseAgent):
             "\n5) conditions用于扁平条件；groups用于分组条件。"
             "\n6) 编号表达（如1. 2. 3.）默认解释为：根logic=or，每个编号项一个group，group.logic=and。"
             "\n7) 时间、日期、字符串尽量保持原文，不要擅自截断、改写或格式化。"
-            "\n8) 不确定时优先选择语义最接近且可执行的字段；若完全无法判断，返回空计划：{\"logic\":\"and\",\"conditions\":[],\"groups\":[]}。"
+            "\n8) BETWEEN 必须使用 value/value2 两个字段，禁止使用 values 数组。"
+            "\n9) 不确定时优先选择语义最接近且可执行的字段；若完全无法判断，返回空计划：{\"logic\":\"and\",\"conditions\":[],\"groups\":[]}。"
             "\n"
             "\n语义映射指引（用于理解，不是输出字段名）："
             "\n- 等于: 是/为/等于/就是/必须是"
@@ -1211,6 +1212,20 @@ class AgentB(BaseAgent):
         if "为空" in segment:
             return {"field": field, "operator": "is_null"}
 
+        # 日期区间（优先于数值区间）：如 2020/7/1 到 2020/8/31
+        m_date_between = re.search(
+            r"(?:从|在)?\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2}(?:\s+\d{1,2}:\d{1,2}(?::\d{1,2}(?:\.\d+)?)?)?)\s*(?:到|至|between)\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2}(?:\s+\d{1,2}:\d{1,2}(?::\d{1,2}(?:\.\d+)?)?)?)",
+            segment,
+            re.I,
+        )
+        if m_date_between:
+            return {
+                "field": field,
+                "operator": "between",
+                "value": m_date_between.group(1).strip(),
+                "value2": m_date_between.group(2).strip(),
+            }
+
         m_between = re.search(r"(?:在)?\s*([\-]?[0-9]+(?:\.[0-9]+)?)\s*(?:到|至|between)\s*([\-]?[0-9]+(?:\.[0-9]+)?)", segment, re.I)
         if m_between:
             return {
@@ -1319,6 +1334,14 @@ class AgentB(BaseAgent):
                 continue
 
             item = {"field": field, "operator": operator}
+
+            # 兼容 LLM 将 between 错写为 values=[low, high]
+            if operator == "between" and isinstance(cond.get("values"), list):
+                vv = cond.get("values", [])
+                if len(vv) >= 2:
+                    item["value"] = vv[0]
+                    item["value2"] = vv[1]
+
             if "value" in cond:
                 item["value"] = cond["value"]
             if "value2" in cond:
@@ -1348,6 +1371,11 @@ class AgentB(BaseAgent):
                 if field not in columns or operator not in self._operator_map:
                     continue
                 item = {"field": field, "operator": operator}
+                if operator == "between" and isinstance(cond.get("values"), list):
+                    vv = cond.get("values", [])
+                    if len(vv) >= 2:
+                        item["value"] = vv[0]
+                        item["value2"] = vv[1]
                 if "value" in cond:
                     item["value"] = cond["value"]
                 if "value2" in cond:
@@ -1439,6 +1467,12 @@ class AgentB(BaseAgent):
         return not self._op_in(row_value, condition)
 
     def _op_between(self, row_value: Any, condition: Dict[str, Any]) -> bool:
+        low_dt = self._to_datetime_if_possible(condition.get("value"))
+        high_dt = self._to_datetime_if_possible(condition.get("value2"))
+        current_dt = self._to_datetime_if_possible(row_value)
+        if low_dt is not None and high_dt is not None and current_dt is not None:
+            return low_dt <= current_dt <= high_dt
+
         low = self._to_number_if_possible(condition.get("value"))
         high = self._to_number_if_possible(condition.get("value2"))
         current = self._to_number_if_possible(row_value)
@@ -1472,6 +1506,18 @@ class AgentB(BaseAgent):
         return text in {"-", "--", "—", "——"}
 
     def _compare_numeric_or_text(self, left: Any, right: Any, op: str) -> bool:
+        ld = self._to_datetime_if_possible(left)
+        rd = self._to_datetime_if_possible(right)
+        if ld is not None and rd is not None:
+            if op == "gt":
+                return ld > rd
+            if op == "gte":
+                return ld >= rd
+            if op == "lt":
+                return ld < rd
+            if op == "lte":
+                return ld <= rd
+
         ln = self._to_number_if_possible(left)
         rn = self._to_number_if_possible(right)
         if isinstance(ln, (int, float)) and isinstance(rn, (int, float)):
@@ -1519,6 +1565,36 @@ class AgentB(BaseAgent):
                 return value
 
         return value
+
+    def _to_datetime_if_possible(self, value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, datetime.min.time())
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        normalized = text.replace("年", "-").replace("月", "-").replace("日", "")
+        normalized = normalized.replace("/", "-")
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        # 常见数据里会出现秒后附加 .0，如 09:00:00.0
+        normalized = re.sub(r"(\d{2}:\d{2}:\d{2})\.\d+$", r"\1", normalized)
+
+        formats = [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+        ]
+        for fmt in formats:
+            try:
+                return datetime.strptime(normalized, fmt)
+            except Exception:
+                continue
+        return None
 
     def _normalize_str(self, value: Any) -> str:
         if self._is_empty_like(value):
@@ -1646,6 +1722,530 @@ def _read_optional_list(module, name: str):
     return None
 
 
+def _infer_table_targets_from_prompt(prompt: str) -> List[Dict[str, Any]]:
+    """Infer table_targets from a block-style prompt.
+
+    Expected style:
+      表一：
+        监测时间：...
+        城市：...
+      表二：
+        ...
+
+    Returns empty list when prompt does not look like a multi-table instruction.
+    """
+
+    text = str(prompt or "").strip()
+    if not text:
+        return []
+
+    inferred: List[Dict[str, Any]] = []
+
+    # 形态1：块级样式（标题独占一行）
+    block_markers = list(
+        re.finditer(
+            r"^\s*((?:表|目标|场景)[^\n：:]{0,60})\s*[：:]\s*$",
+            text,
+            flags=re.M,
+        )
+    )
+    if len(block_markers) >= 2:
+        for idx, marker in enumerate(block_markers):
+            name = marker.group(1).strip() or f"表{idx + 1}"
+            start = marker.end()
+            end = block_markers[idx + 1].start() if idx + 1 < len(block_markers) else len(text)
+            block = text[start:end].strip()
+
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            # 用分号串联行内条件，避免字段值吞并下一字段（如“监测时间 ... 城市 ...”）。
+            instruction = "；".join(lines).strip()
+            if not instruction:
+                continue
+
+            inferred.append(
+                {
+                    "name": name,
+                    "instruction": instruction,
+                    "template_sheet_name": name,
+                    "template_header_row": 1,
+                    "template_start_row": 2,
+                    "template_table_index": idx,
+                }
+            )
+
+        if len(inferred) >= 2:
+            return inferred
+
+    # 形态2：行内样式（目标名与条件同一行）
+    inline_matches = re.findall(
+        r"(?:^|\n)\s*((?:表|目标|场景)[^\n：:]{0,60})\s*[：:]\s*([^\n]+)",
+        text,
+        flags=re.M,
+    )
+    if len(inline_matches) < 2:
+        return []
+
+    for idx, pair in enumerate(inline_matches):
+        name = str(pair[0]).strip() or f"表{idx + 1}"
+        instruction = str(pair[1]).strip().rstrip("。；;")
+        if not instruction:
+            continue
+        inferred.append(
+            {
+                "name": name,
+                "instruction": instruction,
+                "template_sheet_name": name,
+                "template_header_row": 1,
+                "template_start_row": 2,
+                "template_table_index": idx,
+            }
+        )
+
+    return inferred if len(inferred) >= 2 else []
+
+
+def _extract_json_object_from_text(text: str) -> Dict[str, Any]:
+    content = str(text or "").strip()
+    if not content:
+        return {}
+
+    try:
+        obj = json.loads(content)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+
+    start = content.find("{")
+    end = content.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return {}
+
+    fragment = content[start : end + 1]
+    try:
+        obj = json.loads(fragment)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _sanitize_inferred_table_targets(raw_targets: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw_targets, list):
+        return []
+
+    result: List[Dict[str, Any]] = []
+    for idx, item in enumerate(raw_targets):
+        if not isinstance(item, dict):
+            continue
+
+        instruction = str(item.get("instruction") or item.get("condition") or "").strip()
+        if not instruction:
+            continue
+
+        name = str(item.get("name") or f"表{idx + 1}").strip() or f"表{idx + 1}"
+        sheet_name = str(item.get("template_sheet_name") or name).strip() or name
+
+        try:
+            table_index = int(item.get("template_table_index", idx))
+        except Exception:
+            table_index = idx
+
+        try:
+            header_row = int(item.get("template_header_row", 1))
+        except Exception:
+            header_row = 1
+
+        try:
+            start_row = int(item.get("template_start_row", header_row + 1))
+        except Exception:
+            start_row = header_row + 1
+
+        result.append(
+            {
+                "name": name,
+                "instruction": instruction,
+                "template_sheet_name": sheet_name,
+                "template_header_row": max(1, header_row),
+                "template_start_row": max(1, start_row),
+                "template_table_index": max(0, table_index),
+            }
+        )
+
+    if len(result) < 2:
+        return []
+
+    # 按 table_index 排序并重新编号，避免 LLM 给出跳号/重复号。
+    result.sort(key=lambda x: int(x.get("template_table_index", 0)))
+    for idx, item in enumerate(result):
+        item["template_table_index"] = idx
+        if not str(item.get("template_sheet_name", "")).strip():
+            item["template_sheet_name"] = f"表{idx + 1}"
+
+    return result
+
+
+_REFERENCE_TOKENS = ["同上", "同前", "同第一条", "同上一条"]
+
+
+def _contains_reference_token(text: str) -> bool:
+    content = str(text or "")
+    if any(token in content for token in _REFERENCE_TOKENS):
+        return True
+    return bool(re.search(r"同目标\s*[A-Za-z一二三四五六七八九十]", content))
+
+
+def _normalize_pair_field(field: str) -> str:
+    name = str(field or "").strip()
+    if name == "时间":
+        return "监测时间"
+    return name
+
+
+def _extract_field_pairs_from_instruction(instruction: str) -> Dict[str, str]:
+    text = str(instruction or "")
+    pairs: Dict[str, str] = {}
+
+    # 通用“字段:值”抽取
+    for key, value in re.findall(r"([\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9_\.（）()]{0,19})\s*[：:]\s*([^，。；;\n]+)", text):
+        k = _normalize_pair_field(key)
+        v = str(value).strip().strip("。；;")
+        if k and v:
+            pairs[k] = v
+
+    # 常见口语表达补充
+    simple_fields = ["监测时间", "时间", "城市", "区", "站点名称", "日期"]
+    for field in simple_fields:
+        pattern = rf"{re.escape(field)}\s*(?:是|为|取|锁定|=)\s*([^，。；;\n]+)"
+        m = re.search(pattern, text)
+        if m:
+            k = _normalize_pair_field(field)
+            v = str(m.group(1)).strip().strip("。；;")
+            if k and v:
+                pairs[k] = v
+
+    for field in simple_fields:
+        pattern = rf"{re.escape(field)}\s*(同上|同前|同第一条|同上一条|同目标\s*[A-Za-z一二三四五六七八九十])"
+        m = re.search(pattern, text)
+        if m:
+            k = _normalize_pair_field(field)
+            v = str(m.group(1)).replace(" ", "").strip()
+            if k and v:
+                pairs[k] = v
+
+    return pairs
+
+
+def _ref_label_to_index(label: str) -> Optional[int]:
+    s = str(label or "").strip().replace(" ", "")
+    if not s:
+        return None
+
+    if re.fullmatch(r"[A-Za-z]", s):
+        return ord(s.upper()) - ord("A")
+
+    cn_map = {
+        "一": 0,
+        "二": 1,
+        "三": 2,
+        "四": 3,
+        "五": 4,
+        "六": 5,
+        "七": 6,
+        "八": 7,
+        "九": 8,
+        "十": 9,
+    }
+    return cn_map.get(s)
+
+
+def _select_reference_source_index(instruction: str, current_index: int) -> Optional[int]:
+    text = str(instruction or "")
+    if "同第一条" in text:
+        return 0
+    if any(token in text for token in ["同上一条", "同上", "同前"]):
+        return current_index - 1 if current_index - 1 >= 0 else None
+
+    m = re.search(r"同目标\s*([A-Za-z一二三四五六七八九十])", text)
+    if m:
+        return _ref_label_to_index(m.group(1))
+    return None
+
+
+def _format_instruction_from_pairs(pairs: Dict[str, str]) -> str:
+    if not pairs:
+        return ""
+
+    ordered: List[Tuple[str, str]] = []
+    preferred = ["监测时间", "城市", "区", "站点名称", "日期"]
+    for key in preferred:
+        if key in pairs:
+            ordered.append((key, pairs[key]))
+    for key, value in pairs.items():
+        if key not in preferred:
+            ordered.append((key, value))
+
+    return "；".join([f"{k}：{v}" for k, v in ordered if str(v).strip()])
+
+
+def _resolve_table_target_references_by_rule(targets: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], bool]:
+    if not isinstance(targets, list) or len(targets) < 2:
+        return targets, False
+
+    resolved: List[Dict[str, Any]] = []
+    history_pairs: List[Dict[str, str]] = []
+    unresolved = False
+
+    for idx, target in enumerate(targets):
+        item = dict(target)
+        instruction = str(item.get("instruction") or "").strip()
+        pairs = _extract_field_pairs_from_instruction(instruction)
+
+        src_idx = _select_reference_source_index(instruction, idx)
+        if src_idx is not None and 0 <= src_idx < len(history_pairs):
+            source_pairs = history_pairs[src_idx]
+            for key, val in source_pairs.items():
+                current_val = str(pairs.get(key, "")).strip()
+                if not current_val or _contains_reference_token(current_val):
+                    pairs[key] = val
+
+        rebuilt = _format_instruction_from_pairs(pairs)
+        if rebuilt:
+            item["instruction"] = rebuilt
+
+        if _contains_reference_token(str(item.get("instruction") or "")):
+            unresolved = True
+
+        history_pairs.append(pairs)
+        resolved.append(item)
+
+    return resolved, unresolved
+
+
+def _resolve_table_target_references_with_llm(targets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(targets, list) or len(targets) < 2:
+        return targets
+
+    try:
+        llm = get_llm_service()
+    except Exception:
+        return targets
+
+    if not llm or not llm.is_available():
+        return targets
+
+    payload = []
+    for idx, t in enumerate(targets):
+        payload.append(
+            {
+                "index": idx,
+                "name": str(t.get("name") or f"目标{idx + 1}"),
+                "instruction": str(t.get("instruction") or "").strip(),
+            }
+        )
+
+    system_prompt = (
+        "你是多目标填表指代消解器。"
+        "任务：将每个目标中的“同上/同前/同第一条/同目标A”等指代，改写成自包含条件。"
+        "输出必须为 JSON 对象本体，禁止解释。"
+        "固定格式：{\"table_targets\":[{\"index\":0,\"instruction\":\"...\"}] }。"
+        "约束："
+        "1) 不得改写已明确给出的城市/时间值；"
+        "2) 仅补全缺失条件；"
+        "3) 若无法确定，保留原 instruction。"
+    )
+    user_prompt = f"目标列表：{json.dumps(payload, ensure_ascii=False)}\n请返回 JSON。"
+
+    try:
+        response = llm.chat_with_system(system_prompt=system_prompt, user_input=user_prompt)
+        obj = _extract_json_object_from_text(response)
+    except Exception:
+        return targets
+
+    raw = obj.get("table_targets", []) if isinstance(obj, dict) else []
+    if not isinstance(raw, list):
+        return targets
+
+    updated = [dict(t) for t in targets]
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("index", -1))
+        except Exception:
+            idx = -1
+        if idx < 0 or idx >= len(updated):
+            continue
+
+        instruction = str(item.get("instruction") or "").strip()
+        if instruction:
+            updated[idx]["instruction"] = instruction
+
+    return updated
+
+
+def _resolve_table_target_references(targets: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], str]:
+    resolved, unresolved = _resolve_table_target_references_by_rule(targets)
+    if not unresolved:
+        return resolved, "rule"
+
+    llm_resolved = _resolve_table_target_references_with_llm(resolved)
+    still_unresolved = any(_contains_reference_token(str(t.get("instruction") or "")) for t in llm_resolved)
+    if still_unresolved:
+        return llm_resolved, "llm_partial"
+    return llm_resolved, "llm"
+
+
+def _validate_inferred_table_targets(targets: List[Dict[str, Any]]) -> Tuple[bool, str]:
+    if not isinstance(targets, list) or len(targets) < 2:
+        return False, "table_targets 数量不足（需要至少2个）"
+
+    required = {"instruction", "template_table_index", "template_header_row", "template_start_row"}
+    for i, t in enumerate(targets):
+        if not isinstance(t, dict):
+            return False, f"table_targets[{i}] 不是对象"
+        missing = [k for k in required if k not in t]
+        if missing:
+            return False, f"table_targets[{i}] 缺少字段: {missing}"
+        if not str(t.get("instruction", "")).strip():
+            return False, f"table_targets[{i}] instruction 为空"
+
+    indices = [int(t.get("template_table_index", -1)) for t in targets]
+    if sorted(indices) != list(range(len(targets))):
+        return False, "template_table_index 必须从0开始连续"
+
+    return True, ""
+
+
+def _multi_target_signal_level(prompt: str) -> str:
+    """Return multi-target signal level: strong / weak / none."""
+
+    text = str(prompt or "")
+    if not text.strip():
+        return "none"
+
+    # 强信号：显式“表一/目标A/场景1:”这类标题 >= 2
+    marker_count = len(
+        re.findall(
+            r"(?:表|目标|场景)[^\n：:]{0,60}\s*[：:]",
+            text,
+        )
+    )
+    if marker_count >= 2:
+        return "strong"
+
+    # 弱信号：存在多个“时间+城市”条件对，但不一定真是多表。
+    city_count = len(re.findall(r"城市\s*(?:是|为|：|:)", text))
+    time_count = len(re.findall(r"(?:监测时间|时间)\s*(?:是|为|：|:)", text))
+    if city_count >= 2 and time_count >= 2:
+        return "weak"
+
+    return "none"
+
+
+def _infer_table_mode_with_llm(prompt: str) -> str:
+    """Infer prompt mode: single / multi / unknown."""
+
+    text = str(prompt or "").strip()
+    if not text:
+        return "unknown"
+
+    try:
+        llm = get_llm_service()
+    except Exception:
+        return "unknown"
+
+    if not llm or not llm.is_available():
+        return "unknown"
+
+    system_prompt = (
+        "你是填表任务模式分类器。"
+        "只做一件事：判断用户输入是单表填表还是多表填表。"
+        "输出必须是 JSON 对象本体，禁止解释、禁止 Markdown。"
+        "固定输出格式：{\"mode\":\"single|multi|unknown\",\"reason\":\"...\"}。"
+        "判定规则："
+        "1) 若明确存在两个及以上独立目标（如表一/表二、目标A/B、场景1/2），mode=multi；"
+        "2) 若只是一个筛选目标（即使含多个条件、多个城市列表），mode=single；"
+        "3) 出现“两个文件/多个文件/两份数据”等仅表示数据来源数量，不等于多表；若未出现多个独立目标，仍应判为single；"
+        "3) 无法可靠判断时，mode=unknown。"
+    )
+    user_prompt = f"用户输入:\n{text}\n\n请只输出 JSON。"
+
+    try:
+        response = llm.chat_with_system(system_prompt=system_prompt, user_input=user_prompt)
+        obj = _extract_json_object_from_text(response)
+        mode = str(obj.get("mode", "unknown")).strip().lower()
+        if mode in {"single", "multi", "unknown"}:
+            return mode
+    except Exception:
+        return "unknown"
+
+    return "unknown"
+
+
+def _infer_table_targets_from_prompt_with_llm(prompt: str) -> List[Dict[str, Any]]:
+    text = str(prompt or "").strip()
+    if not text:
+        return []
+
+    try:
+        llm = get_llm_service()
+    except Exception:
+        return []
+
+    if not llm or not llm.is_available():
+        return []
+
+    system_prompt = (
+        "你是多表填表任务的结构化解析器。"
+        "任务：仅当用户明确要填写多个独立目标时，才把整段自然语言拆分成 table_targets；"
+        "若是单表任务或无法确认多表，必须返回空数组以保护单表流程。"
+        "用户文风可能是：表一/表二，目标A/目标B，场景1/场景2，等等。"
+        "输出必须为 JSON 对象本体，禁止解释、禁止 Markdown 代码块。"
+        "固定输出格式："
+        "{\"table_targets\":["
+        "{\"name\":\"表一\",\"instruction\":\"监测时间：... 城市：...\","
+        "\"template_sheet_name\":\"表一\",\"template_header_row\":1,\"template_start_row\":2,\"template_table_index\":0}"
+        "]}。"
+        "硬性约束："
+        "1) 至少拆分2个目标才允许返回非空 table_targets；"
+        "2) 每个目标 instruction 仅包含该目标条件，不要混合其它目标；"
+        "3) template_table_index 从0开始连续递增；"
+        "4) 单表任务（即使有多个筛选条件）必须返回 {\"table_targets\": []}；"
+        "5) 无法可靠拆分时也返回 {\"table_targets\": []}。"
+    )
+
+    user_prompt = (
+        f"用户输入:\n{text}\n\n"
+        "请直接输出 JSON。"
+    )
+
+    try:
+        response = llm.chat_with_system(system_prompt=system_prompt, user_input=user_prompt)
+    except Exception:
+        return []
+
+    parsed = _extract_json_object_from_text(response)
+    targets = _sanitize_inferred_table_targets(parsed.get("table_targets", []))
+    ok, reason = _validate_inferred_table_targets(targets)
+    if ok:
+        return targets
+
+    # 一次修复重试：把上次错误原因反馈给模型，让其仅修正结构。
+    repair_prompt = (
+        f"上一次输出不合规，原因：{reason}。\n"
+        "请在不改变原始语义的前提下修正结构，并只输出 JSON 对象。\n"
+        f"原始用户输入:\n{text}\n"
+    )
+    try:
+        repaired = llm.chat_with_system(system_prompt=system_prompt, user_input=repair_prompt)
+    except Exception:
+        return []
+
+    repaired_obj = _extract_json_object_from_text(repaired)
+    repaired_targets = _sanitize_inferred_table_targets(repaired_obj.get("table_targets", []))
+    ok2, _ = _validate_inferred_table_targets(repaired_targets)
+    return repaired_targets if ok2 else []
+
+
 def run_agent_d_api(
     *,
     src: str,
@@ -1682,10 +2282,63 @@ def run_agent_d_api(
         template_type = FileType.DOCX if suffix == ".docx" else FileType.XLSX
         template_file = FileInfo(path=str(template_path), file_type=template_type)
 
+    normalized_prompt = str(prompt or "").strip()
+    inferred_table_targets: List[Dict[str, Any]] = []
+    inferred_source = ""
+    reference_resolve_source = ""
+    mode_by_llm = "unknown"
+    signal_level = _multi_target_signal_level(normalized_prompt)
+
+    # table_targets 统一由 prompt 推断；外部传入仅为兼容参数，不参与决策。
+    if normalized_prompt:
+        inferred_table_targets = _infer_table_targets_from_prompt(normalized_prompt)
+        if inferred_table_targets:
+            inferred_source = "rule"
+        if not inferred_table_targets:
+            inferred_table_targets = _infer_table_targets_from_prompt_with_llm(normalized_prompt)
+            if inferred_table_targets:
+                inferred_source = "llm"
+
+        if inferred_table_targets:
+            inferred_table_targets, reference_resolve_source = _resolve_table_target_references(inferred_table_targets)
+
+        mode_by_llm = _infer_table_mode_with_llm(normalized_prompt)
+
+    # 多目标强信号，或“弱信号+LLM判多表”同时满足时才fail-fast，避免单表被误判。
+    should_fail_multi = (
+        not inferred_table_targets
+        and (
+            signal_level == "strong"
+            or (signal_level == "weak" and mode_by_llm == "multi")
+        )
+    )
+    if should_fail_multi:
+        return {
+            "success": False,
+            "message": "检测到多目标填表意图，但未能可靠切分为 table_targets。请补充结构化 table_targets 或简化提示词。",
+            "data": {
+                "status": "failed",
+                "reason": "multi_target_inference_failed",
+                "multi_target_signal_level": signal_level,
+                "multi_target_mode_by_llm": mode_by_llm,
+            },
+            "resolved_input": {
+                "src": str(excel_path),
+                "template": template_file.path if template_file else None,
+                "output_json": str(resolved_output_json),
+                "output_template": str(Path(str(output_template)).resolve()) if output_template else None,
+                "table_targets_source": "",
+            },
+        }
+
     parameters: Dict[str, Any] = {"allow_rule_fallback": bool(allow_rule_fallback)}
 
-    if table_targets:
-        parameters["table_targets"] = table_targets
+    if inferred_table_targets:
+        parameters["table_targets"] = inferred_table_targets
+        source_label = inferred_source
+        if reference_resolve_source:
+            source_label = f"{source_label}+coref_{reference_resolve_source}"
+        parameters["table_targets_source"] = source_label
 
     if output_template:
         parameters["template_output_file"] = str(Path(str(output_template)).resolve())
@@ -1704,7 +2357,7 @@ def run_agent_d_api(
 
     task_spec = TaskSpec(
         task_type=TaskType.TABLE_FILLING,
-        instruction=str(prompt or "").strip(),
+        instruction=normalized_prompt,
         source_files=[FileInfo(path=str(excel_path), file_type=FileType.XLSX)],
         template_file=template_file,
         output_file=str(resolved_output_json),
@@ -1723,6 +2376,7 @@ def run_agent_d_api(
             "template": template_file.path if template_file else None,
             "output_json": str(resolved_output_json),
             "output_template": parameters.get("template_output_file"),
+            "table_targets_source": parameters.get("table_targets_source", ""),
         },
     }
 
@@ -1744,3 +2398,125 @@ def run_agent_d_from_data_file(data_py: Path) -> Dict[str, Any]:
         template_start_row=_read_optional_int(m, "template_start_row", None),
         template_table_index=_read_optional_int(m, "template_table_index", None),
     )
+
+
+def _normalize_entity_row_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def run_agent_d_fill_from_entities(
+    *,
+    entities: List[Dict[str, Any]],
+    template: str,
+    output_json: str = "",
+    output_template: str = "",
+    template_sheet_name: str = "",
+    template_header_row: Optional[int] = None,
+    template_start_row: Optional[int] = None,
+    template_table_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Fill a single template from merged structured entities.
+
+    This API is used by mixed mode to write the merged docx+xlsx results
+    into one final template (xlsx/docx), reusing AgentD's mapping/filling logic.
+    """
+
+    root = _project_root()
+    _load_dotenv_file(root / ".env")
+
+    template_path = Path(str(template)).resolve()
+    if not template_path.exists():
+        return {
+            "success": False,
+            "message": f"模板文件不存在: {template_path}",
+            "data": {"status": "failed"},
+        }
+
+    if not isinstance(entities, list) or not entities:
+        return {
+            "success": False,
+            "message": "缺少可填表实体数据（entities 为空）",
+            "data": {"status": "failed"},
+        }
+
+    normalized_rows: List[Dict[str, Any]] = []
+    for row in entities:
+        if not isinstance(row, dict):
+            continue
+        normalized_rows.append({k: _normalize_entity_row_value(v) for k, v in row.items()})
+
+    if not normalized_rows:
+        return {
+            "success": False,
+            "message": "entities 中无有效字典数据",
+            "data": {"status": "failed"},
+        }
+
+    parameters: Dict[str, Any] = {}
+    if output_template:
+        parameters["template_output_file"] = str(Path(str(output_template)).resolve())
+    if template_sheet_name:
+        parameters["template_sheet_name"] = str(template_sheet_name).strip()
+    if template_header_row is not None:
+        parameters["template_header_row"] = int(template_header_row)
+    if template_start_row is not None:
+        parameters["template_start_row"] = int(template_start_row)
+    if template_table_index is not None:
+        parameters["template_table_index"] = int(template_table_index)
+
+    agent = AgentD()
+    source_columns = list({k for row in normalized_rows for k in row.keys()})
+    template_columns = agent._read_template_columns(str(template_path), parameters)
+    mapping = agent._build_template_column_mapping(
+        source_columns=source_columns,
+        template_columns=template_columns,
+        source_rows=normalized_rows,
+        parameters=parameters,
+    )
+
+    if agent._is_excel_template(str(template_path)):
+        if "template_output_file" not in parameters:
+            parameters["template_output_file"] = str(template_path.parent / f"{template_path.stem}_filled.xlsx")
+        template_output = agent._fill_excel_template(
+            filtered_rows=normalized_rows,
+            template_path=str(template_path),
+            mapping=mapping,
+            parameters=parameters,
+        )
+    elif agent._is_docx_template(str(template_path)):
+        if "template_output_file" not in parameters:
+            parameters["template_output_file"] = str(template_path.parent / f"{template_path.stem}_filled.docx")
+        template_output = agent._fill_docx_template(
+            filtered_rows=normalized_rows,
+            template_path=str(template_path),
+            mapping=mapping,
+            parameters=parameters,
+        )
+    else:
+        return {
+            "success": False,
+            "message": f"不支持的模板类型: {template_path.suffix}",
+            "data": {"status": "failed"},
+        }
+
+    if output_json:
+        output_json_path = str(Path(str(output_json)).resolve())
+    else:
+        output_json_path = str(template_path.parent / f"{template_path.stem}_merged_rows.json")
+    output_json_file = agent._write_rows_to_json(normalized_rows, output_json_path)
+
+    return {
+        "success": True,
+        "message": f"统一填表完成，共写入 {len(normalized_rows)} 行",
+        "data": {
+            "status": "completed",
+            "output_json": output_json_file,
+            "template_filled": True,
+            "template_output": template_output,
+            "matched_rows": len(normalized_rows),
+            "total_rows": len(normalized_rows),
+            "template_mapping": mapping,
+        },
+    }

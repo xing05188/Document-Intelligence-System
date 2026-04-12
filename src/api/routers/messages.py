@@ -1,6 +1,7 @@
 """消息管理 API 路由"""
 from __future__ import annotations
 
+import json
 import asyncio
 import queue
 import threading
@@ -15,6 +16,7 @@ from db.session_repository import (
     get_messages,
     get_session_by_id,
 )
+from core.agents.agent_d import run_agent_d_api
 from service.agent_service import AgentService, get_selected_session_files_payload
 
 router = APIRouter(prefix="/api/messages", tags=["消息管理"])
@@ -50,6 +52,40 @@ class SendMessageResponse(BaseModel):
     message_id: int
     content: str
     created_at: str
+
+
+def _pick_table_filling_inputs(files: List[Dict[str, Any]], template_files: List[Dict[str, Any]]):
+    """Pick one xlsx source and one template for direct table filling execution."""
+
+    source_file = next((f for f in files if str(f.get("file_name", "")).lower().endswith(".xlsx")), None)
+    template_file = next(
+        (f for f in template_files if str(f.get("file_name", "")).lower().endswith((".docx", ".xlsx"))),
+        None,
+    )
+    return source_file, template_file
+
+
+def _flatten_table_filling_response(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert run_agent_d_api result into the legacy frontend-friendly shape."""
+
+    data = response.get("data", {}) if isinstance(response, dict) else {}
+    resolved_input = response.get("resolved_input", {}) if isinstance(response, dict) else {}
+    return {
+        "success": bool(response.get("success", False)) if isinstance(response, dict) else False,
+        "message": response.get("message", "") if isinstance(response, dict) else "",
+        "status": data.get("status") if isinstance(data, dict) else None,
+        "excel_path": data.get("excel_path") if isinstance(data, dict) else None,
+        "output_json": data.get("output_json") if isinstance(data, dict) else None,
+        "total_rows": data.get("total_rows") if isinstance(data, dict) else 0,
+        "matched_rows": data.get("matched_rows") if isinstance(data, dict) else 0,
+        "used_plan": data.get("used_plan") if isinstance(data, dict) else None,
+        "plan_source": data.get("plan_source") if isinstance(data, dict) else None,
+        "template_filled": data.get("template_filled") if isinstance(data, dict) else False,
+        "template_output": data.get("template_output") if isinstance(data, dict) else None,
+        "template_mapping": data.get("template_mapping") if isinstance(data, dict) else {},
+        "multi_table_results": data.get("multi_table_results") if isinstance(data, dict) else None,
+        "resolved_input": resolved_input,
+    }
 
 
 def _message_to_dict(m) -> Dict[str, Any]:
@@ -106,6 +142,32 @@ async def send_message(session_id: str, request: SendMessageRequest):
         db_template_files = list(request.template_files or [])
     else:
         db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
+
+    # 表格填表走直达执行核，避免聊天/会话链路与 tests/test_d/run.py 的逻辑偏离。
+    if effective_mode == "table_filling":
+        source_file, template_file = _pick_table_filling_inputs(db_data_files, db_template_files)
+        if source_file and template_file:
+            response = run_agent_d_api(
+                src=str(source_file.get("file_path", "")),
+                prompt=request.content,
+                template=str(template_file.get("file_path", "")),
+                output_json="",
+                output_template="",
+                allow_rule_fallback=True,
+            )
+            table_filling_data = _flatten_table_filling_response(response)
+            ai_msg = add_message(
+                session_id,
+                "assistant",
+                table_filling_data.get("message", ""),
+                {"mode": effective_mode, "tableFillingData": table_filling_data},
+                config=cfg,
+            )
+            return SendMessageResponse(
+                message_id=ai_msg.id,
+                content=ai_msg.content,
+                created_at=ai_msg.created_at.isoformat() + "Z",
+            )
 
     # 调用 Agent 服务获取回复（必须与前端所选模式一致，否则恒走默认对话）
     agent_service = AgentService()
@@ -222,7 +284,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 else:
                     template_files = db_template_files
             elif mode == "table_filling":
-                # 表格填表模式
+                # 表格填表模式走直达执行核，保证与 tests/test_d/run.py 同构。
                 db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
                 db_path_map = {f.get('file_name'): f for f in db_data_files}
                 db_tpl_path_map = {f.get('file_name'): f for f in db_template_files}
@@ -246,6 +308,31 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                             template_files.append(ct)
                 else:
                     template_files = db_template_files
+
+                source_file, template_file = _pick_table_filling_inputs(files, template_files)
+                if source_file and template_file:
+                    user_meta: Dict[str, Any] = {"mode": mode}
+                    if files:
+                        user_meta["files"] = files
+                    if template_files:
+                        user_meta["template_files"] = template_files
+                    add_message(session_id, "user", user_content, user_meta, config=cfg)
+                    await manager.send_json(session_id, {"type": "start", "mode": mode})
+                    response = await asyncio.to_thread(
+                        run_agent_d_api,
+                        src=str(source_file.get("file_path", "")),
+                        prompt=user_content,
+                        template=str(template_file.get("file_path", "")),
+                        output_json="",
+                        output_template="",
+                        allow_rule_fallback=True,
+                    )
+                    table_filling_data = _flatten_table_filling_response(response)
+                    full_response = json.dumps(table_filling_data, ensure_ascii=False)
+                    await manager.send_json(session_id, {"type": "chunk", "content": full_response, "result_type": "table_filling"})
+                    add_message(session_id, "assistant", table_filling_data.get("message", ""), {"mode": mode, "tableFillingData": table_filling_data}, config=cfg)
+                    await manager.send_json(session_id, {"type": "done"})
+                    continue
             elif client_files or client_templates:
                 files = client_files
                 template_files = client_templates

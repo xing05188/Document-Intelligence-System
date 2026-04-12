@@ -5,13 +5,64 @@ import messageApi from '../api/messages'
 import fileApi from '../api/files'
 import agentApi from '../api/agents'
 
+const DEFAULT_MODES = [
+  {
+    id: 'default_conversation',
+    name: '默认对话',
+    description: '自由对话，通用问答',
+    requires_data: false,
+    requires_template: false,
+  },
+  {
+    id: 'document_understanding',
+    name: '文档理解',
+    description: '上传文档后可交互式提问',
+    requires_data: true,
+    requires_template: false,
+  },
+  {
+    id: 'document_editing',
+    name: '文档编辑',
+    description: '自然语言编辑Word/Excel/文本',
+    requires_data: true,
+    requires_template: false,
+  },
+  {
+    id: 'entity_extraction',
+    name: '实体提取',
+    description: '从文档提取结构化数据',
+    requires_data: true,
+    requires_template: null,
+  },
+  {
+    id: 'table_filling',
+    name: '表格填表',
+    description: '条件筛选并填入模板',
+    requires_data: true,
+    requires_template: true,
+  },
+]
+
+function mergeModesWithDefaults(remoteModes = []) {
+  const merged = [...DEFAULT_MODES]
+  const existingIds = new Set(merged.map(m => m.id))
+  for (const mode of remoteModes) {
+    if (!mode || !mode.id) continue
+    if (!existingIds.has(mode.id)) {
+      merged.push(mode)
+      existingIds.add(mode.id)
+    }
+  }
+  return merged
+}
+
 export const useSessionStore = defineStore('session', () => {
   const sessions = ref([])
   const currentSessionId = ref(null)
   const messages = ref([])
   const dataFiles = ref([])
   const templateFiles = ref([])
-  const modes = ref([])
+  const modes = ref([...DEFAULT_MODES])
   const currentMode = ref('default_conversation')
   const isLoading = ref(false)
   const isStreaming = ref(false)
@@ -81,6 +132,7 @@ export const useSessionStore = defineStore('session', () => {
   async function selectSession(sessionId) {
     disconnectWebSocket()
     currentSessionId.value = sessionId
+    await loadModes()
     await loadMessages(sessionId)
     await loadFiles(sessionId)
     const session = sessions.value.find(s => s.session_id === sessionId)
@@ -146,7 +198,17 @@ export const useSessionStore = defineStore('session', () => {
   async function loadMessages(sessionId) {
     try {
       const res = await messageApi.list(sessionId)
-      messages.value = res
+      messages.value = (res || []).map((msg) => {
+        const normalized = { ...msg }
+        const metadata = normalized.metadata || {}
+        if (!normalized.tableFillingData && metadata.tableFillingData) {
+          normalized.tableFillingData = metadata.tableFillingData
+        }
+        if (!normalized.extractionData && metadata.extractionData) {
+          normalized.extractionData = metadata.extractionData
+        }
+        return normalized
+      })
     } catch (e) {
       console.error('加载消息失败:', e)
     }
@@ -155,9 +217,12 @@ export const useSessionStore = defineStore('session', () => {
   async function loadModes() {
     try {
       const res = await agentApi.getCapabilities()
-      modes.value = res.modes
+      const remoteModes = Array.isArray(res?.modes) ? res.modes : []
+      modes.value = mergeModesWithDefaults(remoteModes)
     } catch (e) {
       console.error('加载模式失败:', e)
+      // 网络抖动时保留内置模式，避免界面只显示混合模式。
+      modes.value = mergeModesWithDefaults(modes.value)
     }
   }
 
@@ -174,17 +239,9 @@ export const useSessionStore = defineStore('session', () => {
   async function uploadFile(file, fileType) {
     if (!currentSessionId.value) return
     try {
-      const res = await fileApi.upload(currentSessionId.value, file, fileType)
-      // 防止重复添加（根据 file_id 或 file_path 去重）
-      if (fileType === 'data') {
-        if (!dataFiles.value.some(f => f.id === res.id)) {
-          dataFiles.value.unshift(res)
-        }
-      } else {
-        if (!templateFiles.value.some(f => f.id === res.id)) {
-          templateFiles.value.unshift(res)
-        }
-      }
+      await fileApi.upload(currentSessionId.value, file, fileType)
+      // 以服务端列表为准，避免本地增量导致显示重复或错位。
+      await loadFiles(currentSessionId.value)
     } catch (e) {
       console.error('上传文件失败:', e)
       throw e
@@ -467,6 +524,77 @@ export const useSessionStore = defineStore('session', () => {
     return allEntities
   }
 
+  async function runTableFillingTasksLikeMixed(content, files, template_files) {
+    const excelFiles = files.filter(f => getFileCategory(f.file_name) === 'excel')
+    if (excelFiles.length === 0) return false
+
+    const taskList = excelFiles.map(f => ({ file: f, mode: 'table_filling' }))
+    const results = []
+    const originalMode = currentMode.value
+
+    for (let i = 0; i < taskList.length; i++) {
+      const task = taskList[i]
+      const taskTypeName = '表格处理任务'
+
+      console.log(`[表格填表模式] 任务 ${i + 1}/${taskList.length} -> 表格填表 | 文件: ${task.file.file_name}`)
+
+      showProgressBar.value = true
+      progressValue.value = 0
+      progressMessage.value = `处理文件 ${i + 1}/${taskList.length} - ${taskTypeName}: ${task.file.file_name}`
+
+      messages.value.push({
+        id: Date.now() + i,
+        role: 'assistant',
+        content: progressMessage.value,
+        created_at: new Date().toISOString(),
+        mixedSource: 'single',
+        mixedTaskIndex: i,
+        isProgressMessage: true,
+      })
+
+      const result = await new Promise((resolve) => {
+        pendingResolve = resolve
+        ws.value.send(JSON.stringify({
+          content: content.trim(),
+          mode: 'table_filling',
+          files: [{ ...task.file, is_selected: true }],
+          template_files: template_files,
+        }))
+      })
+
+      results.push({ task, ...result })
+    }
+
+    clearAllSelectedFiles()
+    currentMode.value = originalMode
+
+    if (taskList.length === 1) {
+      return true
+    }
+
+    const successfulResults = results.filter(r => r.success)
+    const allEntities = await mergeMixedEntities(
+      successfulResults.map(r => ({
+        type: 'table_filling',
+        ...r.resp,
+      }))
+    )
+
+    messages.value.push({
+      id: Date.now() + 999,
+      role: 'assistant',
+      content: '',
+      created_at: new Date().toISOString(),
+      mixedSource: 'merged',
+      extractionData: {
+        message: `表格填表完成，共 ${allEntities.length} 条记录（来自 ${successfulResults.length} 个文件）`,
+        entities: allEntities,
+        schema: { fields: Object.keys(allEntities[0] || {}) },
+      },
+    })
+    return true
+  }
+
   async function sendMessage(content) {
     if (!content.trim()) return
 
@@ -487,6 +615,11 @@ export const useSessionStore = defineStore('session', () => {
       created_at: new Date().toISOString(),
       metadata: Object.keys(userMetadata).length ? userMetadata : undefined,
     })
+
+    if (currentMode.value === 'table_filling') {
+      const handled = await runTableFillingTasksLikeMixed(content, files, template_files)
+      if (handled) return
+    }
 
     // 混合模式：始终使用混合模式逻辑，不管文件类型组合
     if (currentMode.value === 'mixed') {
@@ -573,6 +706,41 @@ export const useSessionStore = defineStore('session', () => {
           ...r.resp,
         }))
       )
+
+      // mixed统一填表：把 docx+xlsx 合并实体写入同一个模板（xlsx/docx）。
+      if (template_files.length > 0 && allEntities.length > 0) {
+        const tpl = template_files[0]
+        try {
+          const mixedFillResp = await agentApi.mixedFill({
+            session_id: sessionId,
+            entities: allEntities,
+            template_file: tpl.file_path,
+            output_json: '',
+            output_template: '',
+          })
+
+          const payload = {
+            success: !!mixedFillResp?.success,
+            message: mixedFillResp?.message || '统一填表完成',
+            ...(mixedFillResp?.data || {}),
+          }
+
+          messages.value.push({
+            id: Date.now() + 998,
+            role: 'assistant',
+            content: payload.message || '',
+            created_at: new Date().toISOString(),
+            tableFillingData: payload,
+          })
+        } catch (e) {
+          messages.value.push({
+            id: Date.now() + 998,
+            role: 'assistant',
+            content: `统一填表失败: ${e.message}`,
+            created_at: new Date().toISOString(),
+          })
+        }
+      }
 
       const firstEntityResult = successfulResults.find(r => r.task.mode === 'entity_extraction')
       const schema = firstEntityResult?.extractionData?.schema || { fields: Object.keys(allEntities[0] || {}) }
