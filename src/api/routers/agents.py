@@ -60,6 +60,18 @@ class AgentCapabilitiesResponse(BaseModel):
     modes: List[Dict[str, Any]]
 
 
+class MixedFillRequest(BaseModel):
+    session_id: str = Field(..., description="会话ID")
+    entities: List[Dict[str, Any]] = Field(default_factory=list, description="合并后的结构化实体")
+    template_file: str = Field(..., description="模板文件绝对路径")
+    output_json: str = Field(default="", description="输出JSON路径（可选）")
+    output_template: str = Field(default="", description="输出模板路径（可选）")
+    template_sheet_name: str = Field(default="", description="模板sheet（可选）")
+    template_header_row: int | None = Field(default=None, description="模板表头行（可选）")
+    template_start_row: int | None = Field(default=None, description="模板起始行（可选）")
+    template_table_index: int | None = Field(default=None, description="docx模板表索引（可选）")
+
+
 @router.get("/capabilities", response_model=AgentCapabilitiesResponse)
 async def get_capabilities():
     """获取所有 Agent 能力"""
@@ -80,5 +92,23 @@ async def execute_task(task: TaskSpec):
         mode=task.mode,
         content=task.content,
         files=task.files,
+    )
+    return result
+
+
+@router.post("/mixed-fill")
+async def mixed_fill(request: MixedFillRequest):
+    """统一填表：将mixed模式合并实体写入一个模板（xlsx/docx）。"""
+    from core.agents.agent_d import run_agent_d_fill_from_entities
+
+    result = run_agent_d_fill_from_entities(
+        entities=request.entities,
+        template=request.template_file,
+        output_json=request.output_json,
+        output_template=request.output_template,
+        template_sheet_name=request.template_sheet_name,
+        template_header_row=request.template_header_row,
+        template_start_row=request.template_start_row,
+        template_table_index=request.template_table_index,
     )
     return result

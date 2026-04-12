@@ -5,7 +5,8 @@ import { useSessionStore } from '../stores/sessionStore'
 
 const message = useMessage()
 const sessionStore = useSessionStore()
-const isUploading = ref(false)
+const uploadingCount = ref(0)
+const isUploading = computed(() => uploadingCount.value > 0)
 
 // 根据当前模式判断是否需要显示模板
 const showTemplateTab = computed(() => {
@@ -55,21 +56,29 @@ function getFileTypeTag(type) {
   return item ? { tag: item.tag, label: item.label } : { tag: 'default', label: ext.toUpperCase() }
 }
 
-async function handleUpload(file, fileType) {
-  // 防止重复上传
-  if (isUploading.value) return
+async function handleUploadRequest(options, fileType) {
+  const uploadInfo = options?.file
+  const rawFile = uploadInfo?.file || uploadInfo
+  if (!rawFile) {
+    options?.onError?.()
+    message.error('上传失败: 无法读取文件对象')
+    return
+  }
+
   // 无会话时自动创建（沿用当前选中的模式）
   if (!sessionStore.currentSessionId) {
     await sessionStore.createSession()
   }
-  isUploading.value = true
+  uploadingCount.value += 1
   try {
-    await sessionStore.uploadFile(file.file, fileType)
+    await sessionStore.uploadFile(rawFile, fileType)
+    options?.onFinish?.()
     message.success('上传成功')
   } catch (e) {
+    options?.onError?.()
     message.error('上传失败: ' + e.message)
   } finally {
-    isUploading.value = false
+    uploadingCount.value = Math.max(0, uploadingCount.value - 1)
   }
 }
 </script>
@@ -95,7 +104,7 @@ async function handleUpload(file, fileType) {
           <span class="text-gray-400 text-xs">({{ sessionStore.dataFiles.length }})</span>
         </span>
         <n-upload
-          :custom-request="(options) => handleUpload(options.file, 'data')"
+          :custom-request="(options) => handleUploadRequest(options, 'data')"
           :show-file-list="false"
           :disabled="isUploading"
           accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.md"
@@ -145,7 +154,7 @@ async function handleUpload(file, fileType) {
             <span class="text-gray-400 text-xs">({{ sessionStore.templateFiles.length }})</span>
           </span>
           <n-upload
-            :custom-request="(options) => handleUpload(options.file, 'template')"
+            :custom-request="(options) => handleUploadRequest(options, 'template')"
             :show-file-list="false"
             :disabled="isUploading"
             accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.md"

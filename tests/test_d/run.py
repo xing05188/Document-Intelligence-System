@@ -13,7 +13,11 @@ from core.agents.agent_d import run_agent_d_from_data_file
 
 
 def main() -> None:
-	data_py = ROOT / "tests" / "test_d" / "data1" / "data.py"
+	data_case = sys.argv[1].strip() if len(sys.argv) > 1 else "data6"
+	data_py = ROOT / "tests" / "test_d" / data_case / "data.py"
+	if not data_py.exists():
+		raise SystemExit(f"data case not found: {data_case}")
+
 	summary = run_agent_d_from_data_file(data_py)
 	summary["data_py"] = str(data_py)
 	print(json.dumps(summary, ensure_ascii=False, indent=2))
