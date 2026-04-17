@@ -1,6 +1,6 @@
 <script setup>
 import { NConfigProvider, NMessageProvider, NDialogProvider } from 'naive-ui'
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref, computed } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import ChatArea from './components/ChatArea.vue'
 import ModeSelector from './components/ModeSelector.vue'
@@ -40,7 +40,7 @@ async function handleLogout() {
   <n-config-provider :theme-overrides="themeOverrides">
     <n-message-provider>
       <n-dialog-provider>
-        <AuthPanel v-if="!sessionStore.isAuthenticated" />
+        <AuthPanel v-if="!sessionStore.isAuthenticated && !sessionStore.isInitializing" />
         <div v-else class="h-screen flex">
           <!-- 侧边栏（展开） -->
           <transition name="sidebar-expand">

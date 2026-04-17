@@ -4,7 +4,72 @@ import sessionApi from '../api/sessions'
 import messageApi from '../api/messages'
 import fileApi from '../api/files'
 import agentApi from '../api/agents'
-import authApi from '../api/auth'
+import authApi, { getAccessToken, getUserFromToken } from '../api/auth'
+
+const SESSIONS_KEY = 'doc_sessions'
+const MESSAGES_KEY = 'doc_messages_'
+const STATE_KEY = 'doc_state'
+const MAX_CACHED_MESSAGES = 5
+const CACHE_TTL = 7 * 24 * 60 * 60 * 1000  // 7天过期
+
+function readCache(key) {
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const data = JSON.parse(raw)
+    if (data._ts && Date.now() - data._ts > CACHE_TTL) {
+      localStorage.removeItem(key)
+      return null
+    }
+    return data
+  } catch {
+    return null
+  }
+}
+
+function writeCache(key, data) {
+  try {
+    localStorage.setItem(key, JSON.stringify({ _ts: Date.now(), ...data }))
+  } catch {
+    // localStorage满了，忽略
+  }
+}
+
+function removeCache(key) {
+  try {
+    localStorage.removeItem(key)
+  } catch {}
+}
+
+function cleanOldMessagesCache() {
+  try {
+    const keys = Object.keys(localStorage).filter(k => k.startsWith(MESSAGES_KEY))
+    const metas = keys.map(k => {
+      try { return { key: k, ts: JSON.parse(localStorage.getItem(k) || '{}')._ts || 0 } } catch { return null }
+    }).filter(Boolean).sort((a, b) => b.ts - a.ts)
+    metas.slice(MAX_CACHED_MESSAGES).forEach(m => removeCache(m.key))
+  } catch {}
+}
+
+function saveSessionsCache(sessions, currentSessionId) {
+  writeCache(SESSIONS_KEY, { sessions, currentSessionId })
+}
+
+function loadSessionsCache() {
+  return readCache(SESSIONS_KEY)
+}
+
+function saveMessagesCache(sessionId, messages) {
+  writeCache(MESSAGES_KEY + sessionId, { messages })
+}
+
+function loadMessagesCache(sessionId) {
+  return readCache(MESSAGES_KEY + sessionId)
+}
+
+function removeMessagesCache(sessionId) {
+  removeCache(MESSAGES_KEY + sessionId)
+}
 
 const DEFAULT_MODES = [
   {
@@ -59,19 +124,27 @@ function mergeModesWithDefaults(remoteModes = []) {
 
 export const useSessionStore = defineStore('session', () => {
   const currentUser = ref(null)
+  const tokenVersion = ref(0)  // 用于触发 isAuthenticated 重新计算
   const sessions = ref([])
   const currentSessionId = ref(null)
   const messages = ref([])
   const dataFiles = ref([])
   const templateFiles = ref([])
+  const tempDataFiles = ref([])  // 临时数据文件（不上传数据库）
+  const tempTemplateFiles = ref([])  // 临时模板文件（不上传数据库）
   const modes = ref([...DEFAULT_MODES])
   const currentMode = ref('default_conversation')
   const isLoading = ref(false)
+  const isInitializing = ref(true)  // 新增：初始化状态
   const isStreaming = ref(false)
   const progressValue = ref(0)
   const progressMessage = ref('')
   const showProgressBar = ref(false)
   const ws = ref(null)
+  const wsConnecting = ref(false)
+  let pendingWsResolve = null
+  let lastWsCloseCode = null
+  let lastWsCloseReason = null
 
   let pendingResolve = null
   let pendingResultData = null
@@ -92,7 +165,12 @@ export const useSessionStore = defineStore('session', () => {
     sessions.value.find(s => s.session_id === currentSessionId.value)
   )
 
-  const isAuthenticated = computed(() => !!currentUser.value)
+  const isAuthenticated = computed(() => {
+    tokenVersion.value  // 依赖 tokenVersion 以便在登出时更新
+    if (currentUser.value) return true
+    if (getAccessToken()) return true
+    return false
+  })
 
   const selectedDataFiles = computed(() =>
     dataFiles.value.filter(f => f.is_selected)
@@ -100,6 +178,16 @@ export const useSessionStore = defineStore('session', () => {
 
   const selectedTemplateFiles = computed(() =>
     templateFiles.value.filter(f => f.is_selected)
+  )
+
+  // 选中的临时数据文件
+  const selectedTempDataFiles = computed(() =>
+    tempDataFiles.value.filter(f => f.is_selected)
+  )
+
+  // 选中的临时模板文件
+  const selectedTempTemplateFiles = computed(() =>
+    tempTemplateFiles.value.filter(f => f.is_selected)
   )
 
   const modeConfig = {
@@ -119,15 +207,29 @@ export const useSessionStore = defineStore('session', () => {
     messages.value = []
     dataFiles.value = []
     templateFiles.value = []
+    tempDataFiles.value = []
+    tempTemplateFiles.value = []
+    // 登出时清空缓存
+    try {
+      Object.keys(localStorage).forEach(k => {
+        if (k.startsWith('doc_')) localStorage.removeItem(k)
+      })
+    } catch {}
   }
 
   async function loadCurrentUser() {
+    const token = getAccessToken()
+    if (!token) {
+      currentUser.value = null
+      return null
+    }
     try {
       const user = await authApi.me()
       currentUser.value = user
+      tokenVersion.value++
       return user
     } catch (e) {
-      currentUser.value = null
+      console.warn('验证会话失败，保留本地token:', e.message)
       return null
     }
   }
@@ -149,7 +251,11 @@ export const useSessionStore = defineStore('session', () => {
   async function logout() {
     try {
       await authApi.logout()
+    } catch (e) {
+      console.warn('登出请求失败:', e.message)
     } finally {
+      authApi.clearAccessToken()
+      tokenVersion.value++
       currentUser.value = null
       clearConversationState()
       disconnectWebSocket()
@@ -160,47 +266,130 @@ export const useSessionStore = defineStore('session', () => {
     try {
       const res = await sessionApi.list()
       sessions.value = res.items
+      saveSessionsCache(sessions.value, currentSessionId.value)
     } catch (e) {
       console.error('加载会话列表失败:', e)
     }
   }
 
   async function createSession() {
+    const newSession = {
+      session_id: `temp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      title: '新会话',
+      current_mode: currentMode.value,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+    sessions.value.unshift(newSession)
+    currentSessionId.value = newSession.session_id
+    messages.value = []
+    dataFiles.value = []
+    templateFiles.value = []
+    tempDataFiles.value = []
+    tempTemplateFiles.value = []
+    connectWebSocket()
+
     try {
-      disconnectWebSocket()
       const res = await sessionApi.create({ title: '新会话', current_mode: currentMode.value })
-      sessions.value.unshift(res)
-      await selectSession(res.session_id)
+      const idx = sessions.value.findIndex(s => s.session_id === newSession.session_id)
+      if (idx !== -1) {
+        sessions.value[idx] = res
+      }
+      currentSessionId.value = res.session_id
+      saveSessionsCache(sessions.value, res.session_id)
+      loadModes().catch(console.error)
+      loadFiles(res.session_id).catch(console.error)
+      if (newSession.session_id !== res.session_id) {
+        sessions.value = sessions.value.filter(s => s.session_id !== newSession.session_id)
+      }
     } catch (e) {
       console.error('创建会话失败:', e)
+      sessions.value = sessions.value.filter(s => s.session_id !== newSession.session_id)
+      currentSessionId.value = sessions.value[0]?.session_id || null
     }
   }
 
   async function selectSession(sessionId) {
-    disconnectWebSocket()
+    if (currentSessionId.value === sessionId) return
+
+    const prevWs = ws.value
+    if (prevWs) {
+      prevWs.onclose = null
+      prevWs.onerror = null
+      prevWs.close()
+    }
+
     currentSessionId.value = sessionId
-    await loadModes()
-    await loadMessages(sessionId)
-    await loadFiles(sessionId)
+    messages.value = []
+    // 清空文件列表，上传区域只负责上传临时文件
+    dataFiles.value = []
+    templateFiles.value = []
+    tempDataFiles.value = []
+    tempTemplateFiles.value = []
+
+    // 等待一小段时间确保旧连接完全关闭
+    await new Promise(resolve => setTimeout(resolve, 100))
+    connectWebSocket()
+
     const session = sessions.value.find(s => s.session_id === sessionId)
     if (session) {
       currentMode.value = session.current_mode || 'default_conversation'
     }
-    connectWebSocket()
+
+    const cachedMsgs = loadMessagesCache(sessionId)
+    if (cachedMsgs && cachedMsgs.messages && cachedMsgs.messages.length > 0) {
+      messages.value = cachedMsgs.messages
+    } else {
+      loadMessages(sessionId).catch(console.error)
+    }
+
+    loadModes().catch(e => console.warn('[selectSession] loadModes失败:', e.message))
+
+    // 切换完成后保存缓存
+    saveSessionsCache(sessions.value, sessionId)
   }
 
   async function deleteSession(sessionId) {
+    const wasCurrentSession = currentSessionId.value === sessionId
+    const remainingSessions = sessions.value.filter(s => s.session_id !== sessionId)
+    sessions.value = remainingSessions
+
+    const nextSession = remainingSessions[0]
+    const nextSessionId = nextSession ? nextSession.session_id : null
+    saveSessionsCache(remainingSessions, nextSessionId)
+    removeMessagesCache(sessionId)
+
+    if (wasCurrentSession) {
+      if (nextSession) {
+        currentSessionId.value = nextSession.session_id
+        currentMode.value = nextSession.current_mode || 'default_conversation'
+        messages.value = []
+        dataFiles.value = []
+        templateFiles.value = []
+        tempDataFiles.value = []
+        tempTemplateFiles.value = []
+        const wsPrev = ws.value
+        if (wsPrev) {
+          wsPrev.onclose = null
+          wsPrev.onerror = null
+          wsPrev.close()
+        }
+        connectWebSocket()
+        const cachedMsgs = loadMessagesCache(nextSession.session_id)
+        if (cachedMsgs && cachedMsgs.messages && cachedMsgs.messages.length > 0) {
+          messages.value = cachedMsgs.messages
+        } else {
+          loadMessages(nextSession.session_id).catch(console.error)
+        }
+      } else {
+        currentSessionId.value = null
+        clearConversationState()
+        disconnectWebSocket()
+      }
+    }
+
     try {
       await sessionApi.delete(sessionId)
-      sessions.value = sessions.value.filter(s => s.session_id !== sessionId)
-      if (currentSessionId.value === sessionId) {
-        currentSessionId.value = sessions.value[0]?.session_id || null
-        if (currentSessionId.value) {
-          await selectSession(currentSessionId.value)
-        } else {
-          clearConversationState()
-        }
-      }
     } catch (e) {
       console.error('删除会话失败:', e)
     }
@@ -212,6 +401,7 @@ export const useSessionStore = defineStore('session', () => {
       const idx = sessions.value.findIndex(s => s.session_id === sessionId)
       if (idx !== -1) {
         sessions.value[idx] = { ...sessions.value[idx], ...res }
+        saveSessionsCache(sessions.value, currentSessionId.value)
       }
     } catch (e) {
       console.error('更新会话失败:', e)
@@ -222,7 +412,14 @@ export const useSessionStore = defineStore('session', () => {
     if (currentMode.value === mode) return
     currentMode.value = mode
     if (currentSessionId.value) {
-      await sessionApi.update(currentSessionId.value, { current_mode: mode })
+      const idx = sessions.value.findIndex(s => s.session_id === currentSessionId.value)
+      if (idx !== -1) {
+        sessions.value[idx] = { ...sessions.value[idx], current_mode: mode }
+        saveSessionsCache(sessions.value, currentSessionId.value)
+      }
+      sessionApi.update(currentSessionId.value, { current_mode: mode }).catch(e =>
+        console.warn('[switchMode] 更新模式失败:', e.message)
+      )
     }
     const modeNames = {
       'default_conversation': '默认对话',
@@ -243,7 +440,7 @@ export const useSessionStore = defineStore('session', () => {
   async function loadMessages(sessionId) {
     try {
       const res = await messageApi.list(sessionId)
-      messages.value = (res || []).map((msg) => {
+      const msgs = (res || []).map((msg) => {
         const normalized = { ...msg }
         const metadata = normalized.metadata || {}
         if (!normalized.tableFillingData && metadata.tableFillingData) {
@@ -254,8 +451,13 @@ export const useSessionStore = defineStore('session', () => {
         }
         return normalized
       })
+      // 只有成功返回非空数据时才更新，避免后端超时时清空消息
+      if (msgs.length > 0 || currentSessionId.value === sessionId) {
+        messages.value = msgs
+        saveMessagesCache(sessionId, msgs)
+      }
     } catch (e) {
-      console.error('加载消息失败:', e)
+      console.warn('加载消息失败，保留本地消息:', e.message)
     }
   }
 
@@ -276,6 +478,7 @@ export const useSessionStore = defineStore('session', () => {
       const res = await fileApi.list(sessionId)
       dataFiles.value = res.data_files || []
       templateFiles.value = res.template_files || []
+      // 临时文件由前端单独管理，不从数据库加载
     } catch (e) {
       console.error('加载文件失败:', e)
     }
@@ -284,9 +487,24 @@ export const useSessionStore = defineStore('session', () => {
   async function uploadFile(file, fileType) {
     if (!currentSessionId.value) return
     try {
-      await fileApi.upload(currentSessionId.value, file, fileType)
-      // 以服务端列表为准，避免本地增量导致显示重复或错位。
-      await loadFiles(currentSessionId.value)
+      // 使用临时上传端点，不存入数据库
+      const res = await fileApi.uploadTemp(currentSessionId.value, file, fileType)
+      const fileInfo = {
+        id: `temp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        file_name: res.file_name,
+        storage_key: res.storage_key,
+        file_path: res.file_path,
+        file_type: res.file_type,
+        file_size: res.file_size,
+        is_selected: false,
+        created_at: res.created_at,
+      }
+      // 添加到临时文件列表
+      if (fileType === 'data') {
+        tempDataFiles.value.push(fileInfo)
+      } else {
+        tempTemplateFiles.value.push(fileInfo)
+      }
     } catch (e) {
       console.error('上传文件失败:', e)
       throw e
@@ -294,28 +512,55 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   async function toggleFileSelection(fileId, fileType, isSelected) {
-    try {
-      await fileApi.updateSelection(currentSessionId.value, [{ file_id: fileId, is_selected: isSelected }])
-      const files = fileType === 'data' ? dataFiles.value : templateFiles.value
-      const idx = files.findIndex(f => f.id === fileId)
+    // 区分数据库文件和临时文件
+    if (String(fileId).startsWith('temp_')) {
+      // 临时文件：只更新本地状态
+      const tempList = fileType === 'data' ? tempDataFiles : tempTemplateFiles
+      const idx = tempList.value.findIndex(f => f.id === fileId)
       if (idx !== -1) {
-        files[idx].is_selected = isSelected
+        tempList.value[idx].is_selected = isSelected
       }
-    } catch (e) {
-      console.error('更新文件选择失败:', e)
+    } else {
+      // 数据库文件：同步到服务器
+      try {
+        await fileApi.updateSelection(currentSessionId.value, [{ file_id: fileId, is_selected: isSelected }])
+        const files = fileType === 'data' ? dataFiles.value : templateFiles.value
+        const idx = files.findIndex(f => f.id === fileId)
+        if (idx !== -1) {
+          files[idx].is_selected = isSelected
+        }
+      } catch (e) {
+        console.error('更新文件选择失败:', e)
+      }
     }
   }
 
   async function deleteFile(fileId, fileType) {
-    try {
-      await fileApi.delete(currentSessionId.value, fileId)
-      if (fileType === 'data') {
-        dataFiles.value = dataFiles.value.filter(f => f.id !== fileId)
-      } else {
-        templateFiles.value = templateFiles.value.filter(f => f.id !== fileId)
+    // 区分数据库文件和临时文件
+    if (String(fileId).startsWith('temp_')) {
+      // 临时文件：只从本地删除
+      const tempList = fileType === 'data' ? tempDataFiles : tempTemplateFiles
+      const fileInfo = tempList.value.find(f => f.id === fileId)
+      if (fileInfo) {
+        try {
+          await fileApi.deleteTempFile(currentSessionId.value, fileInfo.storage_key)
+        } catch (e) {
+          console.warn('删除临时文件失败:', e)
+        }
+        tempList.value = tempList.value.filter(f => f.id !== fileId)
       }
-    } catch (e) {
-      console.error('删除文件失败:', e)
+    } else {
+      // 数据库文件：从数据库删除
+      try {
+        await fileApi.delete(currentSessionId.value, fileId)
+        if (fileType === 'data') {
+          dataFiles.value = dataFiles.value.filter(f => f.id !== fileId)
+        } else {
+          templateFiles.value = templateFiles.value.filter(f => f.id !== fileId)
+        }
+      } catch (e) {
+        console.error('删除文件失败:', e)
+      }
     }
   }
 
@@ -328,6 +573,10 @@ export const useSessionStore = defineStore('session', () => {
       }
       if (socket.readyState === WebSocket.OPEN) {
         resolve(true)
+        return
+      }
+      if (wsConnecting.value) {
+        setTimeout(() => resolve(waitForWebSocketOpen(maxMs)), 50)
         return
       }
       const start = Date.now()
@@ -357,9 +606,25 @@ export const useSessionStore = defineStore('session', () => {
 
   function connectWebSocket() {
     if (!currentSessionId.value) return
-    disconnectWebSocket()
+    const targetSessionId = currentSessionId.value
 
-    ws.value = messageApi.connect(currentSessionId.value)
+    // 如果正在连接，先等待之前的连接完成或超时
+    if (wsConnecting.value) {
+      return
+    }
+
+    // 关闭旧连接
+    if (ws.value) {
+      ws.value.onclose = null
+      ws.value.onerror = null
+      ws.value.close()
+      ws.value = null
+    }
+
+    isStreaming.value = false
+    wsConnecting.value = true
+
+    ws.value = messageApi.connect(targetSessionId)
 
     ws.value.onmessage = (event) => {
       const data = JSON.parse(event.data)
@@ -437,8 +702,9 @@ export const useSessionStore = defineStore('session', () => {
         progressValue.value = 100
         progressMessage.value = '处理完成'
         if (currentSessionId.value) {
-          loadMessages(currentSessionId.value).catch((e) => console.error('刷新消息失败:', e))
-          loadFiles(currentSessionId.value).catch((e) => console.error('刷新文件失败:', e))
+          saveMessagesCache(currentSessionId.value, messages.value)
+          // 清理已发送的临时文件（从本地列表移除）
+          cleanupSentTempFiles()
         }
         if (pendingResolve) {
           pendingResolve({ success: true, resp: pendingResultData })
@@ -458,18 +724,28 @@ export const useSessionStore = defineStore('session', () => {
       }
     }
 
-    ws.value.onclose = () => {
+    ws.value.onclose = (event) => {
+      lastWsCloseCode = event.code
+      lastWsCloseReason = event.reason
       ws.value = null
       isStreaming.value = false
+      wsConnecting.value = false
+      if (pendingWsResolve) { pendingWsResolve(false); pendingWsResolve = null }
     }
 
     ws.value.onerror = (e) => {
-      console.error('WebSocket 错误:', e)
+      console.warn('[WebSocket] 连接失败:', e)
+      const errorCode = lastWsCloseCode
+      const errorReason = lastWsCloseReason
       ws.value = null
       isStreaming.value = false
+      wsConnecting.value = false
+      if (pendingWsResolve) { pendingWsResolve(false); pendingWsResolve = null }
     }
 
     ws.value.onopen = () => {
+      wsConnecting.value = false
+      if (pendingWsResolve) { pendingWsResolve(true); pendingWsResolve = null }
     }
   }
 
@@ -503,7 +779,26 @@ export const useSessionStore = defineStore('session', () => {
   function clearAllSelectedFiles() {
     dataFiles.value.forEach(f => { f.is_selected = false })
     templateFiles.value.forEach(f => { f.is_selected = false })
+    tempDataFiles.value.forEach(f => { f.is_selected = false })
+    tempTemplateFiles.value.forEach(f => { f.is_selected = false })
+    // 数据库文件需要同步到服务器
     syncFileSelectionToServer()
+  }
+
+  function clearTempSelection() {
+    // 只清除临时文件的选中状态
+    tempDataFiles.value.forEach(f => { f.is_selected = false })
+    tempTemplateFiles.value.forEach(f => { f.is_selected = false })
+  }
+
+  function cleanupSentTempFiles() {
+    // 清理已发送的临时文件（发送完成后从本地列表移除）
+    const sentTempIds = new Set([
+      ...selectedTempDataFiles.value.map(f => f.id),
+      ...selectedTempTemplateFiles.value.map(f => f.id),
+    ])
+    tempDataFiles.value = tempDataFiles.value.filter(f => !sentTempIds.has(f.id))
+    tempTemplateFiles.value = tempTemplateFiles.value.filter(f => !sentTempIds.has(f.id))
   }
 
   async function syncFileSelectionToServer() {
@@ -524,18 +819,21 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   function getSelectedFilesPayload() {
-    const dataFiles = selectedDataFiles.value.map(f => ({
+    // 现在只使用临时文件列表
+    const dataFiles = selectedTempDataFiles.value.map(f => ({
       file_id: f.id,
       file_name: f.file_name,
       storage_key: f.storage_key,
       file_size: f.file_size,
+      file_type: f.file_type || 'data',
       is_selected: true,
     }))
-    const templateFiles = selectedTemplateFiles.value.map(f => ({
+    const templateFiles = selectedTempTemplateFiles.value.map(f => ({
       file_id: f.id,
       file_name: f.file_name,
       storage_key: f.storage_key,
       file_size: f.file_size,
+      file_type: f.file_type || 'template',
       is_selected: true,
     }))
     return { files: dataFiles, template_files: templateFiles }
@@ -722,6 +1020,19 @@ export const useSessionStore = defineStore('session', () => {
           isProgressMessage: true,
         })
 
+        // 等待 WebSocket 连接成功后再发送
+        const canStream = await waitForWebSocketOpen()
+        if (!canStream || !ws.value || ws.value.readyState !== WebSocket.OPEN) {
+          messages.value.push({
+            id: Date.now() + i + 1000,
+            role: 'assistant',
+            content: 'WebSocket 连接失败，请重试',
+            created_at: new Date().toISOString(),
+          })
+          results.push({ task, success: false })
+          continue
+        }
+
         const result = await new Promise((resolve) => {
           pendingResolve = resolve
           ws.value.send(JSON.stringify({
@@ -832,26 +1143,66 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   async function init() {
-    await loadCurrentUser()
-    if (!currentUser.value) {
+    const token = getAccessToken()
+
+    if (!token) {
       clearConversationState()
+      isInitializing.value = false
       return
     }
-    await loadSessions()
-    await loadModes()
-    if (sessions.value.length > 0) {
-      await selectSession(sessions.value[0].session_id)
+
+    const localUser = getUserFromToken()
+    if (localUser) {
+      currentUser.value = localUser
     }
+
+    const cached = loadSessionsCache()
+    if (cached && cached.sessions && cached.sessions.length > 0) {
+      sessions.value = cached.sessions
+      if (cached.currentSessionId) {
+        currentSessionId.value = cached.currentSessionId
+        const sess = sessions.value.find(s => s.session_id === cached.currentSessionId)
+        if (sess) {
+          currentMode.value = sess.current_mode || 'default_conversation'
+        }
+        const cachedMsgs = loadMessagesCache(cached.currentSessionId)
+        if (cachedMsgs && cachedMsgs.messages) {
+          messages.value = cachedMsgs.messages
+        }
+      }
+    }
+
+    isInitializing.value = false
+
+    try {
+      await loadSessions()
+    } catch (e) {
+      console.warn('[init] loadSessions失败:', e)
+    }
+
+    if (currentSessionId.value) {
+      connectWebSocket()
+      const cachedMsgs = loadMessagesCache(currentSessionId.value)
+      if (!cachedMsgs || !cachedMsgs.messages || cachedMsgs.messages.length === 0) {
+        loadMessages(currentSessionId.value).catch(console.error)
+      }
+      // 不再从数据库加载文件列表
+    }
+
+    loadModes().catch(e => console.warn('[init] loadModes失败:', e.message))
   }
 
   return {
     currentUser,
     isAuthenticated,
+    isInitializing,
     sessions,
     currentSessionId,
     messages,
     dataFiles,
     templateFiles,
+    tempDataFiles,
+    tempTemplateFiles,
     modes,
     currentMode,
     isLoading,
@@ -862,6 +1213,8 @@ export const useSessionStore = defineStore('session', () => {
     currentSession,
     selectedDataFiles,
     selectedTemplateFiles,
+    selectedTempDataFiles,
+    selectedTempTemplateFiles,
     currentModeConfig,
     loadCurrentUser,
     login,
@@ -888,5 +1241,6 @@ export const useSessionStore = defineStore('session', () => {
     disconnectWebSocket,
     downloadFile,
     downloadSessionFile,
+    cleanupSentTempFiles,
   }
 })

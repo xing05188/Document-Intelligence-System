@@ -104,7 +104,7 @@ async def list_sessions_api(limit: int = 50, offset: int = 0, authorization: Opt
                 title=s.title,
                 current_mode=s.current_mode,
                 message_count=s.message_count,
-                updated_at=s.updated_at
+                updated_at=s.updated_at or "",
             ) for s in items],
             total=total,
         )

@@ -24,10 +24,15 @@ from db.session_repository import (
 )
 
 router = APIRouter(prefix="/api/sessions/{session_id}/files", tags=["文件管理"])
+temp_router = APIRouter(prefix="/api/sessions/{session_id}/temp-files", tags=["临时文件管理"])
 
 # 文件存储目录
 UPLOAD_DIR = Path("workspace/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# 临时文件存储目录
+TEMP_UPLOAD_DIR = Path("workspace/temp_uploads")
+TEMP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class SessionFile(BaseModel):
@@ -49,6 +54,16 @@ class FileListResponse(BaseModel):
 class FileSelectionRequest(BaseModel):
     file_id: int
     is_selected: bool
+
+
+class TempFileResponse(BaseModel):
+    """临时文件响应"""
+    file_name: str
+    file_path: str
+    file_type: str
+    file_size: int
+    storage_key: Optional[str] = None
+    created_at: str
 
 
 def _resolve_current_user(authorization: Optional[str], cfg):
@@ -302,3 +317,96 @@ async def download_by_path(path: str):
         filename=file_path.name,
         media_type="application/octet-stream",
     )
+
+
+# ============ 临时文件上传（不上传数据库）============
+
+@temp_router.post("/upload", response_model=TempFileResponse)
+async def upload_temp_file(
+    session_id: str,
+    file: UploadFile,
+    file_type: str = Form(..., description="文件类型: data 或 template"),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    上传临时文件（仅保存文件，不存入数据库）
+    文件信息返回给前端，前端本地管理
+    """
+    cfg = load_config()
+    _resolve_current_user(authorization, cfg)
+
+    # 验证文件类型
+    if file_type not in ("data", "template"):
+        raise HTTPException(status_code=400, detail="file_type 必须是 'data' 或 'template'")
+
+    # 保存文件到临时目录
+    file_name = file.filename or "unnamed"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = f"{timestamp}_{file_name}"
+    file_size = 0
+
+    if cfg.storage.enabled and cfg.storage.provider == "azure_blob":
+        storage_key = upload_stream_to_storage(
+            file.file,
+            config=cfg,
+            blob_name=build_blob_name(session_id, safe_name, prefix=cfg.storage.azure_blob_prefix),
+            content_type=file.content_type,
+        )
+        if not storage_key:
+            raise HTTPException(status_code=502, detail="Azure Blob 上传失败")
+        try:
+            file.file.seek(0, 2)
+            file_size = file.file.tell()
+        except Exception:
+            file_size = 0
+    else:
+        file_path = TEMP_UPLOAD_DIR / session_id / safe_name
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, "wb") as buffer:
+            while chunk := file.file.read(8192):
+                buffer.write(chunk)
+                file_size += len(chunk)
+        storage_key = str(file_path)
+
+    return TempFileResponse(
+        file_name=file_name,
+        file_path=storage_key,
+        file_type=file_type,
+        file_size=file_size,
+        storage_key=storage_key,
+        created_at=datetime.now().isoformat() + "Z",
+    )
+
+
+@temp_router.delete("/{file_path:path}")
+async def delete_temp_file(
+    session_id: str,
+    file_path: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    删除临时文件
+    前端取消上传或删除时调用
+    """
+    cfg = load_config()
+    _resolve_current_user(authorization, cfg)
+
+    path_obj = Path(file_path)
+    if not str(path_obj).startswith(str(TEMP_UPLOAD_DIR)):
+        raise HTTPException(status_code=400, detail="无效的临时文件路径")
+
+    try:
+        if path_obj.exists():
+            path_obj.unlink()
+    except Exception:
+        pass
+
+    # 尝试删除空目录
+    try:
+        parent = path_obj.parent
+        if parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+    except Exception:
+        pass
+
+    return {"success": True}

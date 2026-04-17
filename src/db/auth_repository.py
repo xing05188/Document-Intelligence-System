@@ -231,16 +231,5 @@ def resolve_user_from_authorization(
         raise PermissionError("登录会话已失效")
     if session.expires_at < _utc_now():
         raise PermissionError("登录会话已过期")
-    with db_connection(cfg) as conn:
-        with conn.transaction():
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE auth_sessions
-                    SET last_used_at = %s,
-                        updated_at = %s
-                    WHERE token_hash = %s
-                    """,
-                    (_utc_now(), _utc_now(), token_hash(token)),
-                )
+    # 不在每次请求时更新 last_used_at（改为后台定期更新，或仅在登录时更新一次）
     return user

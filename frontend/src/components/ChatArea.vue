@@ -9,20 +9,33 @@ const showProgress = computed(() => sessionStore.showProgressBar)
 const progressVal = computed(() => sessionStore.progressValue)
 const progressMsg = computed(() => sessionStore.progressMessage)
 const inputValue = ref('')
-const messagesContainer = ref(null)
+const scrollRef = ref(null)
 
 // 滚动到底部
 function scrollToBottom() {
   nextTick(() => {
-    if (messagesContainer.value) {
-      messagesContainer.value.scrollTo({ top: messagesContainer.value.scrollHeight, behavior: 'smooth' })
-    }
+    setTimeout(() => {
+      if (scrollRef.value) {
+        scrollRef.value.scrollTop = scrollRef.value.scrollHeight
+      }
+    }, 50)
   })
 }
 
+// 切换会话时滚动
+watch(() => sessionStore.currentSessionId, () => {
+  scrollToBottom()
+})
+
+// 消息变化时滚动
 watch(() => sessionStore.messages.length, scrollToBottom)
 watch(() => sessionStore.isStreaming, (streaming) => {
   if (streaming) scrollToBottom()
+})
+
+onMounted(() => {
+  sessionStore.connectWebSocket()
+  scrollToBottom()
 })
 
 async function handleSend() {
@@ -132,6 +145,7 @@ function downloadFilteredJson(msg) {
 
 onMounted(() => {
   sessionStore.connectWebSocket()
+  scrollToBottom()
 })
 
 onUnmounted(() => {
@@ -142,9 +156,17 @@ onUnmounted(() => {
 <template>
   <div class="h-full flex flex-col">
       <!-- 消息列表 -->
-    <n-scrollbar ref="messagesContainer" class="flex-1 p-4">
+    <div ref="scrollRef" class="flex-1 p-4 overflow-y-auto">
+      <!-- 加载中状态 -->
+      <div v-if="sessionStore.isInitializing" class="h-full flex items-center justify-center text-gray-400">
+        <div class="text-center">
+          <div class="text-4xl mb-4 animate-pulse">💬</div>
+          <div class="text-sm">加载消息...</div>
+        </div>
+      </div>
+
       <!-- 空状态 -->
-      <div v-if="sessionStore.messages.length === 0" class="h-full flex items-center justify-center text-gray-400">
+      <div v-else-if="sessionStore.messages.length === 0" class="h-full flex items-center justify-center text-gray-400">
         <div class="text-center">
           <div class="text-4xl mb-4">💬</div>
           <div>开始对话吧！</div>
@@ -371,7 +393,7 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
-    </n-scrollbar>
+    </div>
 
     <!-- 输入区域 -->
     <div class="border-t bg-white p-4">

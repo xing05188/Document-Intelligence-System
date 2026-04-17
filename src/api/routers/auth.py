@@ -80,6 +80,7 @@ async def register(request: RegisterRequest, http_request: Request):
         subject=user.id,
         phone=user.phone,
         display_name=user.display_name,
+        status=user.status,
         expires_delta_minutes=cfg.auth.access_token_ttl_minutes,
     )
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=cfg.auth.access_token_ttl_minutes)
@@ -115,6 +116,7 @@ async def login(request: LoginRequest, http_request: Request):
         subject=user.id,
         phone=user.phone,
         display_name=user.display_name,
+        status=user.status,
         expires_delta_minutes=cfg.auth.access_token_ttl_minutes,
     )
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=cfg.auth.access_token_ttl_minutes)
