@@ -95,12 +95,24 @@ def _resolve_file_reference(file_info: Dict[str, Any], cfg, session_id: str, kin
         try:
             return str(download_file_to_local(storage_key, cache_path, config=cfg))
         except Exception:
-            return storage_key
+            pass
 
-    # 本地临时文件路径，直接返回
-    if Path(storage_key).exists():
-        return storage_key
+    # 本地临时文件路径检查：先尝试直接路径，再尝试相对 UPLOAD_DIR 的路径
+    storage_path = Path(storage_key)
+    if storage_path.is_absolute() and storage_path.exists():
+        return str(storage_path)
 
+    # 尝试相对于项目根目录的路径
+    upload_dir = Path("workspace/uploads")
+    relative_path = upload_dir / storage_key if not str(storage_key).startswith(str(upload_dir)) else storage_path
+    if relative_path.exists():
+        return str(relative_path)
+
+    # 如果找不到，尝试作为相对路径直接使用（可能文件在其他位置）
+    if storage_path.exists():
+        return str(storage_path)
+
+    # 返回原始路径，让调用方处理错误
     return storage_key
 
 
@@ -425,8 +437,13 @@ class ConnectionManager:
             await self.active_connections[session_id].send_text(text)
     
     async def send_json(self, session_id: str, data: dict):
-        if session_id in self.active_connections:
+        if session_id not in self.active_connections:
+            return
+        try:
             await self.active_connections[session_id].send_json(data)
+        except Exception:
+            # WebSocket 已关闭，忽略发送失败
+            pass
 
 
 manager = ConnectionManager()

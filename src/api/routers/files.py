@@ -186,6 +186,7 @@ async def upload_file(
             while chunk := file.file.read(8192):
                 buffer.write(chunk)
                 file_size += len(chunk)
+        storage_key = str(file_path)
     
     # 保存到数据库
     session_file = add_session_file(
@@ -210,20 +211,35 @@ async def update_file_selections(
     selections: List[FileSelectionRequest],
     authorization: Optional[str] = Header(default=None),
 ):
-    """批量更新文件勾选状态"""
+    """批量更新文件勾选状态
+
+    请求体格式:
+    [
+        {"file_id": 1, "is_selected": true},
+        {"file_id": 2, "is_selected": false}
+    ]
+    """
     cfg = load_config()
     current_user = _resolve_current_user(authorization, cfg)
-    
+
     # 检查会话是否存在
     session = get_session_by_id(session_id, config=cfg, user_id=current_user.id if current_user else None)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
-    
+
+    # 如果传入的是包装对象，尝试解包
+    if len(selections) == 1 and hasattr(selections[0], '__dict__'):
+        data = selections[0].__dict__
+        if 'selections' in data or 'items' in data:
+            items = data.get('selections') or data.get('items') or []
+            if isinstance(items, list) and len(items) > 0 and isinstance(items[0], dict):
+                selections = [FileSelectionRequest(**item) for item in items]
+
     results = []
     for sel in selections:
         success = update_file_selection(sel.file_id, sel.is_selected, config=cfg, user_id=current_user.id if current_user else None)
         results.append({"file_id": sel.file_id, "success": success})
-    
+
     return {"results": results}
 
 

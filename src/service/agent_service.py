@@ -56,7 +56,29 @@ def _resolve_local_file_path(file_dict: Dict[str, Any], config: SystemConfig, se
     try:
         return str(download_file_to_local(storage_key, cache_path, config=config))
     except Exception:
-        return storage_key
+        pass
+
+    # 本地临时文件路径检查：先尝试直接路径，再尝试相对路径
+    storage_path = Path(storage_key)
+    if storage_path.is_absolute() and storage_path.exists():
+        return str(storage_path)
+
+    # 尝试相对于项目根目录的路径
+    upload_dir = Path("workspace/uploads")
+    relative_path = upload_dir / storage_key if not str(storage_key).startswith(str(upload_dir)) else storage_path
+    if relative_path.exists():
+        return str(relative_path)
+
+    # 如果文件存在于缓存目录的子目录中
+    if session_id:
+        session_cache_dir = cache_dir.parent / session_id
+        if session_cache_dir.exists():
+            for f in session_cache_dir.rglob("*"):
+                if f.is_file() and f.name == file_name:
+                    return str(f)
+
+    # 返回原始路径，让调用方处理错误
+    return storage_key
 
 
 def set_agent_files(agent: Any, files: List[Dict[str, Any]], config: SystemConfig, session_id: str = None):

@@ -1,12 +1,13 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { NUpload, NButton, NTag, NAlert, NScrollbar, useMessage } from 'naive-ui'
+import { NUpload, NButton, NTag, NScrollbar, useMessage } from 'naive-ui'
 import { useSessionStore } from '../stores/sessionStore'
 
 const message = useMessage()
 const sessionStore = useSessionStore()
 const uploadingCount = ref(0)
 const isUploading = computed(() => uploadingCount.value > 0)
+const activeTab = ref('data')
 
 // 上传区域只显示临时文件
 const tempDataFiles = computed(() => sessionStore.tempDataFiles)
@@ -23,25 +24,9 @@ const showTemplateTab = computed(() => {
   return config.requiresTemplate !== false
 })
 
-// 判断是否有未上传必需模板
-const templateRequired = computed(() => {
-  return sessionStore.currentModeConfig.requiresTemplate === true
-})
-
 // 整个上传区域是否显示
 const showUploadPanel = computed(() => {
   return showDataTab.value || showTemplateTab.value
-})
-
-const hasTemplateWarning = computed(() => {
-  // table_filling 模式下不显示警告
-  if (sessionStore.currentMode === 'table_filling') {
-    return null
-  }
-  if (templateRequired.value && sessionStore.selectedTempTemplateFiles.length === 0) {
-    return 'warning'
-  }
-  return null
 })
 
 function formatSize(bytes) {
@@ -69,6 +54,15 @@ function getFileTypeTag(type) {
   return item ? { tag: item.tag, label: item.label } : { tag: 'default', label: ext.toUpperCase() }
 }
 
+function getFileIcon(type) {
+  const ext = type.split('.').pop().toLowerCase()
+  if (['pdf'].includes(ext)) return '📄'
+  if (['doc', 'docx'].includes(ext)) return '📝'
+  if (['xls', 'xlsx', 'csv'].includes(ext)) return '📊'
+  if (['png', 'jpg', 'jpeg'].includes(ext)) return '🖼️'
+  return '📎'
+}
+
 async function handleUploadRequest(options, fileType) {
   const uploadInfo = options?.file
   const rawFile = uploadInfo?.file || uploadInfo
@@ -94,119 +88,279 @@ async function handleUploadRequest(options, fileType) {
     uploadingCount.value = Math.max(0, uploadingCount.value - 1)
   }
 }
+
+// 当前标签对应的文件列表
+const currentFiles = computed(() => {
+  return activeTab.value === 'data' ? tempDataFiles.value : tempTemplateFiles.value
+})
+
+// 当前上传类型
+const currentUploadType = computed(() => {
+  return activeTab.value
+})
 </script>
 
 <template>
-  <div v-if="showUploadPanel">
-    <!-- 警告提示 -->
-    <n-alert
-      v-if="hasTemplateWarning"
-      type="warning"
-      :title="templateRequired ? '请上传模板文件' : '提示'"
-      class="mb-3"
-      :bordered="false"
-    >
-      {{ templateRequired ? '当前模式需要模板文件才能正常工作' : '如需指定输出格式，请上传模板文件' }}
-    </n-alert>
-
-    <!-- 数据文件 -->
-    <div v-if="showDataTab" class="mb-3">
-      <div class="flex items-center justify-between mb-2">
-        <span class="text-sm font-medium text-gray-700">
-          数据文件
-          <span class="text-gray-400 text-xs">({{ tempDataFiles.length }})</span>
-        </span>
-        <n-upload
-          :custom-request="(options) => handleUploadRequest(options, 'data')"
-          :show-file-list="false"
-          :disabled="isUploading"
-          accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.md"
-          multiple
-        >
-          <n-button size="small" :loading="isUploading">+ 上传数据</n-button>
-        </n-upload>
-      </div>
-
-      <n-scrollbar x-scrollable v-if="tempDataFiles.length > 0">
-        <div class="flex gap-2 pb-1">
-          <div
-            v-for="file in tempDataFiles"
-            :key="file.id"
-            :class="[
-              'flex items-center gap-2 px-3 py-1.5 rounded border text-sm',
-              file.is_selected ? 'bg-green-50 border-green-300' : 'bg-white border-gray-200'
-            ]"
-          >
-            <input
-              type="checkbox"
-              :checked="file.is_selected"
-              @change="sessionStore.toggleFileSelection(file.id, 'data', $event.target.checked)"
-              class="w-4 h-4 text-green-600 rounded focus:ring-green-500"
-            />
-            <span class="truncate max-w-32">{{ file.file_name }}</span>
-            <n-tag :type="getFileTypeTag(file.file_name).tag" size="tiny">{{ getFileTypeTag(file.file_name).label }}</n-tag>
-            <span class="text-xs text-gray-400">{{ formatSize(file.file_size) }}</span>
-            <button
-              @click="sessionStore.deleteFile(file.id, 'data')"
-              class="text-gray-400 hover:text-red-500"
-            >
-              ×
-            </button>
-          </div>
-        </div>
-      </n-scrollbar>
-      <div v-else class="text-gray-400 text-sm">暂无数据文件</div>
+  <div v-if="showUploadPanel" class="file-panel">
+    <!-- 标签页切换 -->
+    <div class="tabs">
+      <button
+        v-if="showDataTab"
+        :class="['tab', { active: activeTab === 'data' }]"
+        @click="activeTab = 'data'"
+      >
+        数据文件
+        <span class="tab-count">({{ tempDataFiles.length }})</span>
+      </button>
+      <button
+        v-if="showTemplateTab"
+        :class="['tab', { active: activeTab === 'template' }]"
+        @click="activeTab = 'template'"
+      >
+        模板文件
+        <span class="tab-count">({{ tempTemplateFiles.length }})</span>
+      </button>
     </div>
 
-    <!-- 模板文件（条件显示） -->
-    <div v-if="showTemplateTab">
-      <div class="border-t pt-3">
-        <div class="flex items-center justify-between mb-2">
-          <span class="text-sm font-medium text-gray-700">
-            模板文件
-            <span class="text-gray-400 text-xs">({{ tempTemplateFiles.length }})</span>
-          </span>
-          <n-upload
-            :custom-request="(options) => handleUploadRequest(options, 'template')"
-            :show-file-list="false"
-            :disabled="isUploading"
-            accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.md"
-            multiple
-          >
-            <n-button size="small" :loading="isUploading">+ 上传模板</n-button>
-          </n-upload>
+    <!-- 拖拽上传区域 -->
+    <n-upload
+      :custom-request="(options) => handleUploadRequest(options, currentUploadType)"
+      :show-file-list="false"
+      :disabled="isUploading"
+      accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.md"
+      multiple
+      drag
+      class="upload-area"
+    >
+      <div class="upload-content">
+        <svg xmlns="http://www.w3.org/2000/svg" class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <div class="upload-text">
+          <span class="upload-hint">拖拽文件到此处，或</span>
+          <span class="upload-action">点击上传</span>
         </div>
-
-        <n-scrollbar x-scrollable v-if="tempTemplateFiles.length > 0">
-          <div class="flex gap-2 pb-1">
-            <div
-              v-for="file in tempTemplateFiles"
-              :key="file.id"
-              :class="[
-                'flex items-center gap-2 px-3 py-1.5 rounded border text-sm',
-                file.is_selected ? 'bg-green-50 border-green-300' : 'bg-white border-gray-200'
-              ]"
-            >
-              <input
-                type="checkbox"
-                :checked="file.is_selected"
-                @change="sessionStore.toggleFileSelection(file.id, 'template', $event.target.checked)"
-                class="w-4 h-4 text-green-600 rounded focus:ring-green-500"
-              />
-              <span class="truncate max-w-32">{{ file.file_name }}</span>
-              <n-tag :type="getFileTypeTag(file.file_name).tag" size="tiny">{{ getFileTypeTag(file.file_name).label }}</n-tag>
-              <span class="text-xs text-gray-400">{{ formatSize(file.file_size) }}</span>
-              <button
-                @click="sessionStore.deleteFile(file.id, 'template')"
-                class="text-gray-400 hover:text-red-500"
-              >
-                ×
-              </button>
-            </div>
-          </div>
-        </n-scrollbar>
-        <div v-else class="text-gray-400 text-sm">暂无模板文件</div>
       </div>
+    </n-upload>
+
+    <!-- 文件列表 -->
+    <div v-if="currentFiles.length > 0" class="file-list">
+      <div
+        v-for="file in currentFiles"
+        :key="file.id"
+        class="file-card"
+      >
+        <input
+          type="checkbox"
+          :checked="file.is_selected"
+          @change="sessionStore.toggleFileSelection(file.id, activeTab, $event.target.checked)"
+          class="file-checkbox"
+        />
+        <span class="file-icon">{{ getFileIcon(file.file_name) }}</span>
+        <div class="file-info">
+          <span class="file-name">{{ file.file_name }}</span>
+          <span class="file-size">{{ formatSize(file.file_size) }}</span>
+        </div>
+        <n-tag :type="getFileTypeTag(file.file_name).tag" size="small" class="file-tag">
+          {{ getFileTypeTag(file.file_name).label }}
+        </n-tag>
+        <button
+          @click="sessionStore.deleteFile(file.id, activeTab)"
+          class="file-delete"
+          title="删除"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="delete-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div v-else class="empty-state">
+      <span>暂无{{ activeTab === 'data' ? '数据' : '模板' }}文件</span>
     </div>
   </div>
 </template>
+
+<style scoped>
+.file-panel {
+  padding: 12px 16px;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 8px;
+}
+
+.tab {
+  padding: 6px 16px;
+  border: none;
+  background: transparent;
+  color: #6b7280;
+  font-size: 14px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+
+.tab:hover {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.tab.active {
+  background: #18a058;
+  color: white;
+}
+
+.tab-count {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.upload-area {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.upload-area :deep(.n-upload-dragger) {
+  padding: 20px;
+  background: #f9fafb;
+  border: 2px dashed #d1d5db;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+.upload-area :deep(.n-upload-dragger:hover) {
+  border-color: #18a058;
+  background: #f0fdf4;
+}
+
+.upload-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.upload-icon {
+  width: 32px;
+  height: 32px;
+  color: #9ca3af;
+}
+
+.upload-text {
+  display: flex;
+  gap: 4px;
+  font-size: 14px;
+}
+
+.upload-hint {
+  color: #6b7280;
+}
+
+.upload-action {
+  color: #18a058;
+  font-weight: 500;
+}
+
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+.file-card:hover {
+  border-color: #d1d5db;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.file-card:has(.file-checkbox:checked) {
+  background: #f0fdf4;
+  border-color: #86efac;
+}
+
+.file-checkbox {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: #18a058;
+}
+
+.file-icon {
+  font-size: 20px;
+}
+
+.file-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.file-name {
+  font-size: 14px;
+  color: #374151;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-size {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.file-tag {
+  flex-shrink: 0;
+}
+
+.file-delete {
+  padding: 4px;
+  border: none;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.file-delete:hover {
+  background: #fee2e2;
+  color: #ef4444;
+}
+
+.delete-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.empty-state {
+  padding: 20px;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 14px;
+}
+</style>

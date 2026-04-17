@@ -214,7 +214,7 @@ def list_sessions(
             title=str(row["title"]),
             current_mode=str(row["current_mode"]),
             message_count=int(row.get("message_count", 0)),
-            updated_at=row["updated_at"].isoformat() + "Z" if row.get("updated_at") else "",
+            updated_at=row["updated_at"].isoformat() if row.get("updated_at") else "",
         )
         for row in rows
     ]
