@@ -121,8 +121,13 @@ async function handleLogout() {
               </div>
             </div>
 
-            <!-- 文件面板 -->
-            <div v-if="showFilePanel" class="border-b bg-gray-50">
+            <!-- 聊天区域 -->
+            <div class="flex-1 overflow-hidden flex flex-col">
+              <ChatArea />
+            </div>
+
+            <!-- 文件面板（底部，可折叠） -->
+            <div v-if="showFilePanel" class="border-t bg-gray-50">
               <!-- 折叠/展开按钮 -->
               <div class="flex items-center px-4 py-2">
                 <button
@@ -140,7 +145,7 @@ async function handleLogout() {
                     stroke-linecap="round"
                     stroke-linejoin="round"
                   >
-                    <polyline points="18 15 12 9 6 15"/>
+                    <polyline points="6 9 12 15 18 9"/>
                   </svg>
                   <span>文件上传</span>
                 </button>
@@ -152,11 +157,6 @@ async function handleLogout() {
               >
                 <FilePanel />
               </div>
-            </div>
-
-            <!-- 聊天区域 -->
-            <div class="flex-1 overflow-hidden">
-              <ChatArea />
             </div>
           </main>
         </div>

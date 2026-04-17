@@ -69,8 +69,8 @@ def _session_to_dict(s) -> Dict[str, Any]:
         "title": s.title,
         "current_mode": s.current_mode,
         "user_id": str(user_id) if user_id else None,
-        "created_at": s.created_at.isoformat() + "Z" if s.created_at else "",
-        "updated_at": s.updated_at.isoformat() + "Z" if s.updated_at else "",
+        "created_at": s.created_at.isoformat() if s.created_at else "",
+        "updated_at": s.updated_at.isoformat() if s.updated_at else "",
     }
 
 
