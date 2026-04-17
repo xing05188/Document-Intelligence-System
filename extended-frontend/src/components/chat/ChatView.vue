@@ -18,6 +18,11 @@ const messagesContainer = ref(null)
 const inputText = ref('')
 const textareaRef = ref(null)
 const isDragover = ref(false)
+const previewEntities = ref({})
+
+const showProgress = computed(() => sessionStore.showProgressBar)
+const progressVal = computed(() => sessionStore.progressValue)
+const progressMsg = computed(() => sessionStore.progressMessage)
 
 const chatModes = ['default_conversation', 'document_understanding', 'document_editing', 'mixed']
 const modeLabels = {
@@ -170,6 +175,51 @@ function getFileExt(fileName) {
   return ext ? ext.toUpperCase() : 'FILE'
 }
 
+function downloadResultFile(fileInfo) {
+  const url = `/api/files/download?path=${encodeURIComponent(fileInfo.file_path)}`
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileInfo.file_name
+  a.click()
+}
+
+// ============ 实体提取表格预览 ============
+function getPreviewEntities(msg) {
+  if (!msg) return []
+  if (previewEntities.value[msg.id]) return previewEntities.value[msg.id]
+  const entities = msg.entitiesData || []
+  if (entities.length > 0) {
+    previewEntities.value[msg.id] = entities
+  }
+  return entities
+}
+
+function getEntityHeaders(msg) {
+  const entities = getPreviewEntities(msg)
+  if (!entities || entities.length === 0) return []
+  return Object.keys(entities[0])
+}
+
+function getEntityCells(entity, header) {
+  const val = entity[header]
+  if (val === undefined || val === null) return ''
+  if (Array.isArray(val)) return val[0] ?? ''
+  return String(val)
+}
+
+function downloadEntitiesJson(msg) {
+  const entities = getPreviewEntities(msg)
+  if (!entities.length) return
+  const json = JSON.stringify(entities, null, 2)
+  const blob = new Blob([json], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'extraction_result.json'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 function getFileStyle(fileName) {
   const ext = (fileName || '').split('.').pop().toLowerCase()
   const map = {
@@ -296,22 +346,54 @@ function userMessageAttachments(msg) {
             <!-- 助手消息 -->
             <div v-else class="message-bubble" :class="{ 'md-content': msg.role === 'assistant' }">
               <div v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)"></div>
-            </div>
-            <div class="message-actions" v-if="msg.role === 'assistant'">
-              <button class="message-action" @click="copyMessage(msg.content)">复制</button>
+              <!-- 表格填表结果下载按钮 -->
+              <div v-if="msg.tableFillingData?.generated_files?.length" class="table-result-actions">
+                <div class="result-label">📥 生成结果：</div>
+                <div v-for="f in msg.tableFillingData.generated_files" :key="f.file_id" class="result-file-item">
+                  <span class="result-file-name">📎 {{ f.file_name }}</span>
+                  <button class="download-btn" @click="downloadResultFile(f)">下载</button>
+                </div>
+              </div>
+              <!-- 实体提取结果：表格预览 -->
+              <div v-if="msg.entitiesData?.length" class="entity-preview">
+                <div class="entity-preview-header">
+                  <span class="entity-preview-title">📊 提取结果预览（共 {{ msg.entitiesData.length }} 条）</span>
+                  <div class="entity-preview-actions">
+                    <button v-for="f in msg.generated_files" :key="f.file_id" class="entity-action-btn" @click="downloadResultFile(f)">
+                      {{ getFileExt(f.file_name) }} ↓
+                    </button>
+                  </div>
+                </div>
+                <div class="entity-table-wrapper">
+                  <table class="entity-table">
+                    <thead>
+                      <tr>
+                        <th v-for="h in getEntityHeaders(msg)" :key="h">{{ h }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(entity, rowIdx) in msg.entitiesData.slice(0, 20)" :key="rowIdx">
+                        <td v-for="h in getEntityHeaders(msg)" :key="h" :title="entity[h] != null ? String(entity[h]) : ''">
+                          {{ getEntityCells(entity, h) }}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div v-if="msg.entitiesData.length > 20" class="entity-preview-more">
+                  还有 {{ msg.entitiesData.length - 20 }} 条数据，下载完整文件查看全部
+                </div>
+              </div>
+              <!-- 仅文件下载（没有表格数据时） -->
+              <div v-else-if="msg.generated_files?.length" class="entity-preview-header">
+                <div class="entity-preview-actions">
+                  <button v-for="f in msg.generated_files" :key="f.file_id" class="entity-action-btn" @click="downloadResultFile(f)">
+                    {{ getFileExt(f.file_name) }} ↓
+                  </button>
+                </div>
+              </div>
             </div>
             <div class="message-time">{{ formatTime(msg.created_at) }}</div>
-          </div>
-        </div>
-
-        <div v-if="sessionStore.isStreaming && sessionStore.messages.length > 0" class="message assistant">
-          <div class="message-avatar">🤖</div>
-          <div class="message-content">
-            <div class="message-bubble streaming">
-              <span class="streaming-dot"></span>
-              <span class="streaming-dot"></span>
-              <span class="streaming-dot"></span>
-            </div>
           </div>
         </div>
 
@@ -322,6 +404,24 @@ function userMessageAttachments(msg) {
             <div class="message-bubble upload-progress">
               <span class="upload-icon">📤</span>
               <span class="upload-text">{{ sessionStore.uploadProgress || '正在上传文件...' }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 进度条（实体提取/表格填表） -->
+        <div v-if="showProgress && (sessionStore.currentMode === 'entity_extraction' || sessionStore.currentMode === 'table_filling' || sessionStore.currentMode === 'mixed')" class="message assistant">
+          <div class="message-avatar">⚙️</div>
+          <div class="message-content">
+            <div class="progress-card">
+              <div class="progress-header">
+                <span class="progress-title">任务处理中</span>
+                <span class="progress-msg">{{ progressMsg }}</span>
+                <span v-if="progressVal < 100" class="progress-indicator">●</span>
+                <span v-else class="progress-done">完成</span>
+              </div>
+              <div class="progress-bar-container">
+                <div class="progress-bar" :style="{ width: progressVal + '%' }"></div>
+              </div>
             </div>
           </div>
         </div>
@@ -465,3 +565,203 @@ function userMessageAttachments(msg) {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 进度条 */
+.progress-card {
+  background: #f9fafb;
+  border-radius: 8px;
+  padding: 12px 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.progress-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.progress-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: #374151;
+}
+
+.progress-msg {
+  font-size: 12px;
+  color: #9ca3af;
+  flex: 1;
+}
+
+.progress-indicator {
+  font-size: 12px;
+  color: #9ca3af;
+  animation: pulse 1s infinite;
+}
+
+.progress-done {
+  font-size: 12px;
+  color: #10b981;
+  font-weight: 500;
+}
+
+.progress-bar-container {
+  height: 8px;
+  background: #e5e7eb;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981, #34d399);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* 表格填表结果下载 */
+.table-result-actions {
+  margin-top: 12px;
+  padding: 10px;
+  background: #f0fdf4;
+  border-radius: 8px;
+  border: 1px solid #bbf7d0;
+}
+
+.result-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #166534;
+  margin-bottom: 6px;
+}
+
+.result-file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+
+.result-file-name {
+  font-size: 13px;
+  color: #166534;
+}
+
+.download-btn {
+  background: #10b981;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.download-btn:hover {
+  background: #059669;
+}
+
+/* ============ 实体提取表格预览 ============ */
+.entity-preview {
+  margin-top: 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  overflow: hidden;
+  background: white;
+}
+
+.entity-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: white;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.entity-preview-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #111827;
+}
+
+.entity-preview-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.entity-action-btn {
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.entity-action-btn:hover {
+  background: #2563eb;
+}
+
+.entity-table-wrapper {
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.entity-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  background: white;
+}
+
+.entity-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.entity-table th {
+  background: white;
+  color: #111827;
+  font-weight: 600;
+  padding: 6px 10px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid #d1d5db;
+  border-right: 1px solid #e5e7eb;
+}
+
+.entity-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid #f3f4f6;
+  border-right: 1px solid #f9fafb;
+  color: #111827;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: white;
+}
+
+.entity-table tbody tr:hover td {
+  background: #f0f9ff;
+}
+
+.entity-preview-more {
+  padding: 8px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: #6b7280;
+  background: white;
+  border-top: 1px solid #e5e7eb;
+}
+</style>

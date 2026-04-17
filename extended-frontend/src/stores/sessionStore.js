@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import sessionApi from '../api/sessions'
 import messageApi from '../api/messages'
 import fileApi from '../api/files'
+import agentApi from '../api/agents'
 import { getAccessToken } from '../api/auth'
 import { useFileStore } from './fileStore'
 
@@ -29,6 +30,12 @@ function removeCache(key) {
   try {
     localStorage.removeItem(key)
   } catch {}
+}
+
+function getFileCategory(fileName) {
+  if (/.(docx?|pdf|txt|md)$/i.test(fileName)) return 'document'
+  if (/.(xlsx?|csv)$/i.test(fileName)) return 'excel'
+  return 'unknown'
 }
 
 function saveSessionsCache(sessions, currentSessionId) {
@@ -59,6 +66,15 @@ export const useSessionStore = defineStore('session', () => {
   const sidebarCollapsed = ref(false)
   const ws = ref(null)
   const wsConnecting = ref(false)
+
+  // 进度条相关（混合模式/实体提取/表格填表）
+  const progressValue = ref(0)
+  const progressMessage = ref('')
+  const showProgressBar = ref(false)
+
+  // WebSocket 回调（用于混合模式多任务处理）
+  let pendingResolve = null
+  let pendingResultData = null
 
   // 模式相关
   const currentMode = ref('default_conversation')
@@ -293,6 +309,7 @@ export const useSessionStore = defineStore('session', () => {
       'default_conversation': '默认对话',
       'document_understanding': '文档理解',
       'document_editing': '文档编辑',
+      'mixed': '混合模式',
     }
 
     messages.value.push({
@@ -490,52 +507,149 @@ export const useSessionStore = defineStore('session', () => {
     ws.value = messageApi.connect(currentSessionId.value)
 
     ws.value.onmessage = (event) => {
+      console.log('[WebSocket onmessage] 收到消息:', event.data)
       const data = JSON.parse(event.data)
+      console.log('[WebSocket onmessage] 解析后:', data)
       if (data.type === 'start') {
-        // 开始接收响应
+        console.log('[WebSocket onmessage] type=start, 收到开始信号')
+        isStreaming.value = true
+        // 实体提取/表格填表/混合模式显示进度条
+        const isEntityOrTable = data.result_type === 'entity_extraction' ||
+                               data.result_type === 'table_filling' ||
+                               data.mode === 'entity_extraction' ||
+                               data.mode === 'table_filling'
+        console.log('[WebSocket onmessage] isEntityOrTable:', isEntityOrTable, 'result_type:', data.result_type, 'mode:', data.mode)
+        if (isEntityOrTable) {
+          showProgressBar.value = true
+          progressValue.value = 0
+          progressMessage.value = data.result_type === 'table_filling' || data.mode === 'table_filling'
+            ? '开始筛选数据...'
+            : '开始提取...'
+        }
+      } else if (data.type === 'progress') {
+        console.log('[WebSocket onmessage] type=progress:', data.progress, data.message)
+        progressValue.value = data.progress
+        progressMessage.value = data.message
       } else if (data.type === 'chunk') {
-        // 收到第一个 chunk 时立即停止 loading 动画
+        console.log('[WebSocket onmessage] type=chunk, result_type:', data.result_type, 'content长度:', data.content?.length)
         isStreaming.value = false
-        const lastMsg = messages.value[messages.value.length - 1]
-        if (lastMsg && lastMsg.role === 'assistant') {
-          lastMsg.content += data.content
+        // 实体提取结果处理
+        if (data.result_type === 'entity_extraction') {
+          try {
+            const parsed = JSON.parse(data.content)
+            const entities = Array.isArray(parsed?.entities) ? parsed.entities : []
+            const count = entities.length
+            const summary = `实体提取完成，共提取 ${count} 条数据`
+            const lastMsg = messages.value[messages.value.length - 1]
+            if (lastMsg && lastMsg.role === 'assistant') {
+              lastMsg.content = summary
+              lastMsg.entitiesData = entities
+            } else {
+              messages.value.push({
+                id: Date.now(),
+                role: 'assistant',
+                content: summary,
+                created_at: new Date().toISOString(),
+                entitiesData: entities,
+              })
+            }
+            pendingResultData = { extractionData: parsed, entities }
+            console.log('[WebSocket onmessage] 实体提取结果解析成功, count:', count, 'keys:', Object.keys(parsed))
+          } catch (e) {
+            console.error('[WebSocket onmessage] 解析实体提取结果失败:', e)
+          }
+        } else if (data.result_type === 'table_filling') {
+          try {
+            const parsed = JSON.parse(data.content)
+            console.log('[WebSocket onmessage] table_filling parsed, keys:', Object.keys(parsed), 'generated_files:', parsed.generated_files)
+            const lastMsg = messages.value[messages.value.length - 1]
+            if (lastMsg && lastMsg.role === 'assistant') {
+              lastMsg.tableFillingData = parsed
+            } else {
+              messages.value.push({
+                id: Date.now(),
+                role: 'assistant',
+                content: parsed.message || '',
+                created_at: new Date().toISOString(),
+                tableFillingData: parsed,
+              })
+            }
+            pendingResultData = { tableFillingData: parsed }
+            console.log('[WebSocket onmessage] table_filling stored, msg count:', messages.value.length, 'lastMsg.tableFillingData:', !!messages.value[messages.value.length - 1]?.tableFillingData)
+          } catch (e) {
+            console.error('[WebSocket onmessage] 解析表格填表结果失败:', e)
+          }
         } else {
-          messages.value.push({
-            id: Date.now(),
-            role: 'assistant',
-            content: data.content,
-            created_at: new Date().toISOString(),
-          })
+          // 普通流式文本
+          const lastMsg = messages.value[messages.value.length - 1]
+          if (lastMsg && lastMsg.role === 'assistant') {
+            lastMsg.content += data.content
+          } else {
+            messages.value.push({
+              id: Date.now(),
+              role: 'assistant',
+              content: data.content,
+              created_at: new Date().toISOString(),
+            })
+          }
         }
       } else if (data.type === 'done') {
+        console.log('[WebSocket onmessage] type=done, pendingResolve:', !!pendingResolve, 'generated_files:', data.generated_files)
         isStreaming.value = false
+        showProgressBar.value = false
+        progressValue.value = 100
+        progressMessage.value = '处理完成'
+        // 把 generated_files 存入最后一条助手消息
+        if (data.generated_files) {
+          const lastMsg = messages.value[messages.value.length - 1]
+          if (lastMsg && lastMsg.role === 'assistant') {
+            lastMsg.generated_files = data.generated_files
+          }
+        }
         if (currentSessionId.value) {
           saveMessagesCache(currentSessionId.value, messages.value)
         }
+        if (pendingResolve) {
+          const resolveData = { success: true, resp: pendingResultData }
+          if (data.generated_files) resolveData.generated_files = data.generated_files
+          console.log('[WebSocket onmessage] 调用 pendingResolve', resolveData)
+          pendingResolve(resolveData)
+          pendingResolve = null
+          pendingResultData = null
+        }
       } else if (data.type === 'error') {
         const errorMsg = typeof data.message === 'string' ? data.message : JSON.stringify(data.message)
-        console.error('流式错误:', errorMsg)
+        console.error('[WebSocket onmessage] type=error:', errorMsg, 'pendingResolve:', !!pendingResolve)
         isStreaming.value = false
-        messages.value.push({
-          id: Date.now(),
-          role: 'assistant',
-          content: `错误: ${errorMsg}`,
-          created_at: new Date().toISOString(),
-        })
+        showProgressBar.value = false
+        if (pendingResolve) {
+          pendingResolve({ success: false, error: errorMsg })
+          pendingResolve = null
+          pendingResultData = null
+        }
+      } else {
+        console.log('[WebSocket onmessage] 未知类型:', data.type)
       }
     }
 
     ws.value.onclose = () => {
+      console.log('[WebSocket onclose] 连接已关闭, pendingResolve:', !!pendingResolve)
       ws.value = null
       isStreaming.value = false
       wsConnecting.value = false
     }
 
-    ws.value.onerror = () => {
-      console.warn('[WebSocket] 连接失败')
+    ws.value.onerror = (err) => {
+      console.warn('[WebSocket onerror] 连接失败:', err, 'pendingResolve:', !!pendingResolve)
       ws.value = null
       isStreaming.value = false
       wsConnecting.value = false
+      if (pendingResolve) {
+        console.log('[WebSocket onerror] 通过 pendingResolve 报告失败')
+        pendingResolve({ success: false, error: 'WebSocket连接错误' })
+        pendingResolve = null
+        pendingResultData = null
+      }
     }
 
     ws.value.onopen = () => {
@@ -567,31 +681,45 @@ export const useSessionStore = defineStore('session', () => {
     return new Promise((resolve) => {
       const socket = ws.value
       if (!socket) {
+        console.log('[waitForWebSocketOpen] 无 WebSocket 实例')
         resolve(false)
         return
       }
+      console.log('[waitForWebSocketOpen] readyState:', socket.readyState, '(0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED)')
       if (socket.readyState === WebSocket.OPEN) {
+        console.log('[waitForWebSocketOpen] 已 OPEN')
         resolve(true)
         return
       }
       if (socket.readyState === WebSocket.CONNECTING) {
+        console.log('[waitForWebSocketOpen] 等待 CONNECTING...')
         setTimeout(() => resolve(waitForWebSocketOpen(maxMs)), 50)
         return
       }
       const start = Date.now()
       const t = setInterval(() => {
         if (!ws.value || ws.value !== socket) {
+          console.log('[waitForWebSocketOpen] WebSocket 实例已变化')
           clearInterval(t)
           resolve(false)
           return
         }
+        console.log('[waitForWebSocketOpen] polling readyState:', socket.readyState)
         if (socket.readyState === WebSocket.OPEN) {
           clearInterval(t)
+          console.log('[waitForWebSocketOpen] OPEN!')
           resolve(true)
+          return
+        }
+        if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+          clearInterval(t)
+          console.log('[waitForWebSocketOpen] 已 CLOSED/CLOSING')
+          resolve(false)
           return
         }
         if (Date.now() - start > maxMs) {
           clearInterval(t)
+          console.log('[waitForWebSocketOpen] 超时')
           resolve(false)
           return
         }
@@ -675,12 +803,18 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   async function sendToBackend(sessionId, content, mode, files, template_files) {
+    // 混合模式：自动分发任务
+    if (mode === 'mixed') {
+      await runMixedMode(content, files, template_files)
+      return
+    }
+
     console.log('[sendToBackend] 发送请求:', { sessionId, content, mode, files, template_files })
-    clearAllSelectedFiles()
     
     const canStream = await waitForWebSocketOpen()
     if (ws.value && ws.value.readyState === WebSocket.OPEN && canStream) {
       console.log('[sendToBackend] 通过 WebSocket 发送')
+      clearAllSelectedFiles()
       ws.value.send(JSON.stringify({
         content,
         mode,
@@ -689,6 +823,7 @@ export const useSessionStore = defineStore('session', () => {
       }))
     } else {
       console.log('[sendToBackend] 通过 API 发送')
+      clearAllSelectedFiles()
       try {
         await messageApi.send(sessionId, {
           content,
@@ -709,6 +844,156 @@ export const useSessionStore = defineStore('session', () => {
         isStreaming.value = false
       }
     }
+  }
+
+  // 合并混合模式多个任务的实体数据
+  async function mergeMixedEntities(results) {
+    const allEntities = []
+    for (const r of results) {
+      if (r.type === 'entity_extraction') {
+        const entities = r.resp?.extractionData?.entities || []
+        for (const entity of entities) {
+          allEntities.push(entity)
+        }
+      } else if (r.type === 'table_filling') {
+        const outputJson = r.resp?.tableFillingData?.output_json
+        const mapping = r.resp?.tableFillingData?.template_mapping || {}
+        if (outputJson) {
+          try {
+            const url = `/api/files/download?path=${encodeURIComponent(outputJson)}`
+            const resp = await fetch(url)
+            const rows = await resp.json()
+            for (const row of rows) {
+              const entity = {}
+              for (const [tplCol, srcCol] of Object.entries(mapping)) {
+                const val = row[srcCol]
+                entity[tplCol] = Array.isArray(val) ? val : [val, '']
+              }
+              allEntities.push(entity)
+            }
+          } catch (e) {
+            console.error('加载 output_json 失败:', e)
+          }
+        }
+      }
+    }
+    return allEntities
+  }
+
+  // 混合模式主逻辑：按文件类型分发任务
+  async function runMixedMode(content, files, template_files) {
+    const docFiles = files.filter(f => getFileCategory(f.file_name) === 'document')
+    const excelFiles = files.filter(f => getFileCategory(f.file_name) === 'excel')
+
+    // 无文件或纯文本：直接发送
+    if (docFiles.length === 0 && excelFiles.length === 0) {
+      isStreaming.value = true
+      try {
+        await messageApi.send(currentSessionId.value, {
+          content: content.trim(),
+          mode: 'mixed',
+          files: files,
+          template_files: template_files,
+        })
+        await loadMessages(currentSessionId.value)
+      } catch (e) {
+        console.error('发送消息失败:', e)
+      } finally {
+        isStreaming.value = false
+      }
+      return
+    }
+
+    // 构建任务列表
+    const taskList = []
+    docFiles.forEach(f => taskList.push({ file: f, mode: 'entity_extraction' }))
+    excelFiles.forEach(f => taskList.push({ file: f, mode: 'table_filling' }))
+
+    const results = []
+    const originalMode = currentMode.value
+
+    for (let i = 0; i < taskList.length; i++) {
+      const task = taskList[i]
+      const taskTypeName = task.mode === 'entity_extraction' ? '实体提取任务' : '表格处理任务'
+
+      console.log(`[混合模式] 任务 ${i + 1}/${taskList.length} -> ${taskTypeName} | 文件: ${task.file.file_name}`)
+
+      // 显示进度条
+      showProgressBar.value = true
+      progressValue.value = 0
+      const currentProgressMsg = `处理文件 ${i + 1}/${taskList.length} - ${taskTypeName}: ${task.file.file_name}`
+      progressMessage.value = currentProgressMsg
+
+      // 添加任务进度消息
+      messages.value.push({
+        id: Date.now() + i,
+        role: 'assistant',
+        content: currentProgressMsg,
+        created_at: new Date().toISOString(),
+        mixedSource: 'single',
+        mixedTaskIndex: i,
+        isProgressMessage: true,
+      })
+
+      // 等待 WebSocket 连接
+      const canStream = await waitForWebSocketOpen()
+      if (!canStream || !ws.value || ws.value.readyState !== WebSocket.OPEN) {
+        messages.value.push({
+          id: Date.now() + i + 1000,
+          role: 'assistant',
+          content: 'WebSocket 连接失败，请重试',
+          created_at: new Date().toISOString(),
+        })
+        results.push({ task, success: false })
+        continue
+      }
+
+      // 发送任务并等待结果
+      console.log(`[混合模式] 任务 ${i + 1}/${taskList.length} - 发送前 ws.readyState:`, ws.value?.readyState)
+      const result = await new Promise((resolve) => {
+        pendingResolve = resolve
+        try {
+          const msg = JSON.stringify({
+            content: content.trim(),
+            mode: task.mode,
+            files: [{ ...task.file, is_selected: true }],
+            template_files: template_files,
+          })
+          console.log(`[混合模式] 任务 ${i + 1}/${taskList.length} - 发送消息:`, JSON.parse(msg))
+          ws.value.send(msg)
+          console.log(`[混合模式] 任务 ${i + 1}/${taskList.length} - 发送完成，等待结果...`)
+        } catch (e) {
+          console.error(`[混合模式] 任务 ${i + 1}/${taskList.length} - 发送失败:`, e)
+          pendingResolve = null
+          resolve({ success: false, error: e.message })
+        }
+      })
+      console.log(`[混合模式] 任务 ${i + 1}/${taskList.length} - 收到结果:`, result)
+
+      results.push({ task, ...result })
+    }
+
+    // 清空选中状态（注意：混合模式在每个任务完成后才清空，不是发送前清空）
+    clearAllSelectedFiles()
+    currentMode.value = originalMode
+
+    // 单文件直接返回
+    if (taskList.length === 1) {
+      console.log('[混合模式] 单文件处理完成')
+      return
+    }
+
+    // 多文件合并结果
+    const successfulResults = results.filter(r => r.success)
+    const allEntities = await mergeMixedEntities(successfulResults)
+
+    messages.value.push({
+      id: Date.now() + 999,
+      role: 'assistant',
+      content: `混合模式完成，共 ${allEntities.length} 条记录（来自 ${successfulResults.length} 个文件）`,
+      created_at: new Date().toISOString(),
+      mixedSource: 'merged',
+    })
   }
 
   async function init() {
@@ -771,6 +1056,9 @@ export const useSessionStore = defineStore('session', () => {
     currentSession,
     currentMode,
     currentModeConfig,
+    progressValue,
+    progressMessage,
+    showProgressBar,
     init,
     loadSessions,
     createSession,
