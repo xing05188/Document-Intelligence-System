@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from config import load_config
 from core.storage import build_blob_name, download_file_to_local, upload_file_to_storage
+from openpyxl import Workbook
 from db.auth_repository import resolve_user_from_authorization
 from db.session_repository import (
     add_message,
@@ -269,9 +270,204 @@ def _persist_generated_files(session_id: str, cfg, user_id: Optional[str], paylo
                 role="output",
                 storage_key=storage_key,
             )
-            saved_files.append({"file_id": session_file.id, "file_name": dest_path.name, "file_path": str(dest_path)})
+            saved_files.append({
+                "file_id": session_file.id,
+                "file_name": dest_path.name,
+                "file_path": str(dest_path),
+                "file_type": dest_path.suffix.lower().lstrip(".") or "output",
+            })
         except Exception:
             continue
+    return saved_files
+
+
+def _save_entity_extraction_files(session_id: str, cfg, user_id: Optional[str], entities_json: str) -> List[Dict[str, Any]]:
+    """将实体提取结果保存为 JSON 和 XLSX 文件，记录到数据库。"""
+    uploads_dir = Path("workspace/uploads") / session_id
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    saved_files: List[Dict[str, Any]] = []
+
+    try:
+        parsed = json.loads(entities_json)
+        entities = parsed.get("entities", []) if isinstance(parsed, dict) else []
+    except Exception:
+        entities = []
+
+    # 1. 保存 JSON 文件
+    json_name = f"extraction_result_{session_id[:8]}.json"
+    json_path = uploads_dir / json_name
+    try:
+        json_path.write_text(entities_json, encoding="utf-8")
+        storage_key_json = None
+        try:
+            storage_key_json = upload_file_to_storage(
+                json_path,
+                config=cfg,
+                blob_name=build_blob_name(session_id, json_name, prefix=cfg.storage.azure_blob_prefix),
+            )
+        except Exception:
+            storage_key_json = None
+
+        sf_json = add_session_file(
+            session_id=session_id,
+            file_name=json_name,
+            file_type="generated",
+            file_path=str(json_path),
+            file_size=json_path.stat().st_size,
+            config=cfg,
+            user_id=user_id,
+            source="generated",
+            role="output",
+            storage_key=storage_key_json,
+        )
+        saved_files.append({"file_id": sf_json.id, "file_name": json_name, "file_path": str(json_path), "file_type": "json"})
+        print(f"[WS] _save_entity_extraction_files: JSON保存成功 id={sf_json.id} type=json")
+    except Exception as e:
+        print(f"[WS] 保存 JSON 文件失败: {e}")
+
+    # 2. 保存 XLSX 文件
+    if entities:
+        xlsx_name = f"extraction_result_{session_id[:8]}.xlsx"
+        xlsx_path = uploads_dir / xlsx_name
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "提取结果"
+
+            # 表头
+            if entities:
+                headers = list(entities[0].keys())
+                for col_idx, header in enumerate(headers, start=1):
+                    ws.cell(row=1, column=col_idx, value=header)
+
+                # 数据行
+                for row_idx, entity in enumerate(entities, start=2):
+                    for col_idx, header in enumerate(headers, start=1):
+                        val = entity.get(header, "")
+                        if isinstance(val, list) and len(val) >= 1:
+                            val = val[0]
+                        ws.cell(row=row_idx, column=col_idx, value=val)
+
+            wb.save(str(xlsx_path))
+            storage_key_xlsx = None
+            try:
+                storage_key_xlsx = upload_file_to_storage(
+                    xlsx_path,
+                    config=cfg,
+                    blob_name=build_blob_name(session_id, xlsx_name, prefix=cfg.storage.azure_blob_prefix),
+                )
+            except Exception:
+                storage_key_xlsx = None
+
+            sf_xlsx = add_session_file(
+                session_id=session_id,
+                file_name=xlsx_name,
+                file_type="generated",
+                file_path=str(xlsx_path),
+                file_size=xlsx_path.stat().st_size,
+                config=cfg,
+                user_id=user_id,
+                source="generated",
+                role="output",
+                storage_key=storage_key_xlsx,
+            )
+            saved_files.append({"file_id": sf_xlsx.id, "file_name": xlsx_name, "file_path": str(xlsx_path), "file_type": "xlsx"})
+            print(f"[WS] _save_entity_extraction_files: XLSX保存成功 id={sf_xlsx.id} type=xlsx")
+        except Exception as e:
+            print(f"[WS] 保存 XLSX 文件失败: {e}")
+
+    print(f"[WS] _save_entity_extraction_files 返回: {saved_files}")
+    return saved_files
+
+
+def _save_table_filling_files(session_id: str, cfg, user_id: Optional[str], table_filling_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """将表格填表结果保存为 JSON 和 XLSX 文件，记录到数据库。"""
+    uploads_dir = Path("workspace/uploads") / session_id
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    saved_files: List[Dict[str, Any]] = []
+
+    # 1. 保存 JSON 文件（筛选结果）
+    output_json = table_filling_data.get("output_json")
+    if output_json:
+        src_path = Path(output_json)
+        if not src_path.is_absolute():
+            src_path = Path("workspace") / output_json
+        if src_path.exists():
+            json_name = f"table_filling_result_{session_id[:8]}.json"
+            dest_path = uploads_dir / json_name
+            try:
+                import shutil
+                shutil.copy2(src_path, dest_path)
+                storage_key = None
+                try:
+                    storage_key = upload_file_to_storage(
+                        dest_path,
+                        config=cfg,
+                        blob_name=build_blob_name(session_id, json_name, prefix=cfg.storage.azure_blob_prefix),
+                    )
+                except Exception:
+                    storage_key = None
+                sf = add_session_file(
+                    session_id=session_id,
+                    file_name=json_name,
+                    file_type="generated",
+                    file_path=str(dest_path),
+                    file_size=dest_path.stat().st_size,
+                    config=cfg,
+                    user_id=user_id,
+                    source="generated",
+                    role="output",
+                    storage_key=storage_key,
+                )
+                saved_files.append({"file_id": sf.id, "file_name": json_name, "file_path": str(dest_path), "file_type": "json"})
+                print(f"[WS] _save_table_filling_files: JSON保存成功 id={sf.id}")
+            except Exception as e:
+                print(f"[WS] _save_table_filling_files: 保存JSON失败: {e}")
+        else:
+            print(f"[WS] _save_table_filling_files: output_json不存在: {src_path}")
+
+    # 2. 保存 XLSX 文件（填好的模板）
+    template_output = table_filling_data.get("template_output")
+    if template_output:
+        src_path = Path(template_output)
+        if not src_path.is_absolute():
+            src_path = Path("workspace") / template_output
+        if src_path.exists():
+            ext = src_path.suffix.lower().lstrip(".") or "xlsx"
+            xlsx_name = f"table_filling_result_{session_id[:8]}.{ext}"
+            dest_path = uploads_dir / xlsx_name
+            try:
+                import shutil
+                shutil.copy2(src_path, dest_path)
+                storage_key = None
+                try:
+                    storage_key = upload_file_to_storage(
+                        dest_path,
+                        config=cfg,
+                        blob_name=build_blob_name(session_id, xlsx_name, prefix=cfg.storage.azure_blob_prefix),
+                    )
+                except Exception:
+                    storage_key = None
+                sf = add_session_file(
+                    session_id=session_id,
+                    file_name=xlsx_name,
+                    file_type="generated",
+                    file_path=str(dest_path),
+                    file_size=dest_path.stat().st_size,
+                    config=cfg,
+                    user_id=user_id,
+                    source="generated",
+                    role="output",
+                    storage_key=storage_key,
+                )
+                saved_files.append({"file_id": sf.id, "file_name": xlsx_name, "file_path": str(dest_path), "file_type": "xlsx"})
+                print(f"[WS] _save_table_filling_files: XLSX保存成功 id={sf.id}")
+            except Exception as e:
+                print(f"[WS] _save_table_filling_files: 保存XLSX失败: {e}")
+        else:
+            print(f"[WS] _save_table_filling_files: template_output不存在: {src_path}")
+
+    print(f"[WS] _save_table_filling_files 返回: {saved_files}")
     return saved_files
 
 
@@ -279,14 +475,25 @@ def _collect_new_generated_files(session_id: str, cfg, user_id: Optional[str], b
     generated: List[Dict[str, Any]] = []
     try:
         rows = get_session_files(session_id, config=cfg, user_id=user_id)
-    except Exception:
+    except Exception as e:
+        print(f"[WS] _collect_new_generated_files 查询失败: {e}")
         return generated
+    print(f"[WS] _collect_new_generated_files: session_id={session_id}, before_ids={before_ids}, 总记录数={len(rows)}")
     for f in rows:
+        print(f"[WS]   文件记录: id={f.id}, file_name={f.file_name}, role={getattr(f, 'role', '')}, file_type={getattr(f, 'file_type', '')}")
         if f.id in before_ids:
+            print(f"[WS]   跳过(已在before_ids): {f.file_name}")
             continue
         if getattr(f, "role", "") != "output":
+            print(f"[WS]   跳过(role非output): {f.file_name}")
             continue
-        generated.append({"file_id": f.id, "file_name": f.file_name})
+        generated.append({
+            "file_id": f.id,
+            "file_name": f.file_name,
+            "file_path": getattr(f, "file_path", ""),
+            "file_type": getattr(f, "file_type", ""),
+        })
+    print(f"[WS] _collect_new_generated_files 返回: {generated}")
     return generated
 
 
@@ -354,7 +561,7 @@ async def send_message(session_id: str, request: SendMessageRequest, authorizati
                 allow_rule_fallback=True,
             )
             table_filling_data = _flatten_table_filling_response(response)
-            saved = _persist_generated_files(session_id, cfg, current_user.id if current_user else None, table_filling_data)
+            saved = _save_table_filling_files(session_id, cfg, current_user.id if current_user else None, table_filling_data)
             if saved:
                 table_filling_data["generated_files"] = saved
             ai_msg = add_message(
@@ -477,6 +684,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
         return
     
     await manager.connect(websocket, session_id)
+    print(f"[WS] 连接已建立 session_id={session_id}")
     
     try:
         # 保持连接循环，持续处理消息
@@ -484,6 +692,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             try:
                 # 等待接收消息（会阻塞在这里直到收到消息或连接关闭）
                 data = await websocket.receive_json()
+                print(f"[WS] 收到消息 session_id={session_id} mode={data.get('mode')} content={data.get('content','')[:50]}")
             except Exception:
                 # 连接已关闭或出错，退出循环
                 break
@@ -559,13 +768,16 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                 source_file, template_file = _pick_table_filling_inputs(files, template_files)
                 if source_file and template_file:
+                    print(f"[WS] table_filling 模式开始处理 session_id={session_id} source={source_file.get('file_name')} template={template_file.get('file_name')}")
                     user_meta: Dict[str, Any] = {"mode": mode}
                     if files:
                         user_meta["files"] = files
                     if template_files:
                         user_meta["template_files"] = template_files
                     add_message(session_id, "user", user_content, user_meta, config=cfg, user_id=current_user.id if current_user else None)
+                    print(f"[WS] 发送 table_filling start type=start mode={mode}")
                     await manager.send_json(session_id, {"type": "start", "mode": mode})
+                    print(f"[WS] 调用 run_agent_d_api...")
                     response = await asyncio.to_thread(
                         run_agent_d_api,
                         src=_resolve_file_reference(source_file, cfg, session_id, "source"),
@@ -575,14 +787,23 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         output_template="",
                         allow_rule_fallback=True,
                     )
+                    print(f"[WS] run_agent_d_api 完成, 响应长度={len(str(response))}")
                     table_filling_data = _flatten_table_filling_response(response)
                     full_response = json.dumps(table_filling_data, ensure_ascii=False)
-                    saved = _persist_generated_files(session_id, cfg, current_user.id if current_user else None, table_filling_data)
+                    print(f"[WS] 发送 table_filling chunk, 内容长度={len(full_response)}")
+                    print(f"[WS] table_filling_data before persist: keys={list(table_filling_data.keys())}")
+                    print(f"[WS] table_filling_data excel_path={table_filling_data.get('excel_path')} template_output={table_filling_data.get('template_output')} output_json={table_filling_data.get('output_json')}")
+                    saved = _save_table_filling_files(session_id, cfg, current_user.id if current_user else None, table_filling_data)
+                    print(f"[WS] _save_table_filling_files 返回: {saved}")
                     if saved:
                         table_filling_data["generated_files"] = saved
                     await manager.send_json(session_id, {"type": "chunk", "content": full_response, "result_type": "table_filling"})
                     add_message(session_id, "assistant", table_filling_data.get("message", ""), {"mode": mode, "tableFillingData": table_filling_data}, config=cfg, user_id=current_user.id if current_user else None)
-                    await manager.send_json(session_id, {"type": "done"})
+                    print(f"[WS] 发送 table_filling done")
+                    done_payload: Dict[str, Any] = {"type": "done"}
+                    if saved:
+                        done_payload["generated_files"] = saved
+                    await manager.send_json(session_id, done_payload)
                     continue
             elif client_files or client_templates:
                 files = client_files
@@ -604,6 +825,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             add_message(session_id, "user", user_content, user_meta, config=cfg, user_id=current_user.id if current_user else None)
             
             # 发送开始信号
+            print(f"[WS] 发送 start type=start mode={mode} session_id={session_id}")
             await manager.send_json(session_id, {"type": "start", "mode": mode})
 
             before_file_ids = {
@@ -650,10 +872,13 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     ):
                         full_response += chunk
                         if mode == "entity_extraction":
+                            print(f"[WS] 发送 entity_extraction chunk, 内容长度={len(chunk)} session_id={session_id}")
                             await manager.send_json(session_id, {"type": "chunk", "content": chunk, "result_type": "entity_extraction"})
                         elif mode == "table_filling":
+                            print(f"[WS] 发送 table_filling chunk, 内容长度={len(chunk)} session_id={session_id}")
                             await manager.send_json(session_id, {"type": "chunk", "content": chunk, "result_type": "table_filling"})
                         else:
+                            print(f"[WS] 发送普通 chunk, 内容长度={len(chunk)} session_id={session_id}")
                             await manager.send_json(session_id, {"type": "chunk", "content": chunk})
                 finally:
                     progress_queue.put_nowait({"_done": True})
@@ -667,8 +892,15 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
             assistant_content = full_response
             assistant_meta: Dict[str, Any] = {"mode": mode}
+            extraction_files: List[Dict[str, Any]] = []
             if mode == "entity_extraction":
                 assistant_content = _normalize_entity_extraction_response(full_response)
+                extraction_files = _save_entity_extraction_files(
+                    session_id,
+                    cfg,
+                    current_user.id if current_user else None,
+                    full_response,
+                )
 
             generated_files = _collect_new_generated_files(
                 session_id,
@@ -676,7 +908,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 current_user.id if current_user else None,
                 before_file_ids,
             )
-            if generated_files:
+            if extraction_files:
+                assistant_meta["generated_files"] = extraction_files
+            elif generated_files:
                 assistant_meta["generated_files"] = generated_files
 
             add_message(
@@ -687,11 +921,21 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 config=cfg,
                 user_id=current_user.id if current_user else None,
             )
-            await manager.send_json(session_id, {"type": "done"})
+            # done 消息带上 generated_files，前端据此显示下载按钮
+            done_payload: Dict[str, Any] = {"type": "done"}
+            final_files = extraction_files if extraction_files else generated_files
+            if final_files:
+                done_payload["generated_files"] = final_files
+            print(f"[WS] done_payload generated_files: {done_payload.get('generated_files')}")
+            await manager.send_json(session_id, done_payload)
+            print(f"[WS] 发送 done session_id={session_id} extraction_files={extraction_files} generated_files={generated_files}")
             
     except WebSocketDisconnect:
+        print(f"[WS] WebSocketDisconnect 正常断开 session_id={session_id}")
         pass  # 正常断开
     except Exception as e:
+        print(f"[WS] Exception: {e} session_id={session_id}")
+        import traceback; traceback.print_exc()
         await manager.send_json(session_id, {"type": "error", "message": str(e)})
     finally:
         manager.disconnect(session_id)
