@@ -68,6 +68,7 @@ def create_access_token(
     subject: str,
     phone: str,
     display_name: Optional[str],
+    status: str = "active",
     expires_delta_minutes: int,
 ) -> str:
     """创建带 HMAC 签名的简易访问令牌。"""
@@ -77,6 +78,7 @@ def create_access_token(
         "sub": subject,
         "phone": phone,
         "display_name": display_name,
+        "status": status,
         "iat": int(issued_at.timestamp()),
         "exp": int(expires_at.timestamp()),
         "typ": "access",

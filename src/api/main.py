@@ -263,11 +263,12 @@ async def post_agent_log(task_id: str, body: Dict[str, Any]):
 # ============ 注册新路由 ============
 
 from api.routers import auth, sessions, messages, files, agents  # noqa: E402
-from api.routers.files import download_router  # noqa: E402
+from api.routers.files import download_router, temp_router  # noqa: E402
 
 app.include_router(auth.router)
 app.include_router(sessions.router)
 app.include_router(messages.router)
 app.include_router(files.router)
+app.include_router(temp_router)
 app.include_router(download_router)
 app.include_router(agents.router)

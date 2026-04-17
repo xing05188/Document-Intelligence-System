@@ -8,6 +8,10 @@ const sessionStore = useSessionStore()
 const uploadingCount = ref(0)
 const isUploading = computed(() => uploadingCount.value > 0)
 
+// 上传区域只显示临时文件
+const tempDataFiles = computed(() => sessionStore.tempDataFiles)
+const tempTemplateFiles = computed(() => sessionStore.tempTemplateFiles)
+
 // 根据当前模式判断是否需要显示模板
 const showTemplateTab = computed(() => {
   const config = sessionStore.currentModeConfig
@@ -20,12 +24,8 @@ const templateRequired = computed(() => {
   return sessionStore.currentModeConfig.requiresTemplate === true
 })
 
-const templateOptional = computed(() => {
-  return sessionStore.currentModeConfig.requiresTemplate === null
-})
-
 const hasTemplateWarning = computed(() => {
-  if (templateRequired.value && sessionStore.selectedTemplateFiles.length === 0) {
+  if (templateRequired.value && sessionStore.selectedTempTemplateFiles.length === 0) {
     return 'warning'
   }
   return null
@@ -101,7 +101,7 @@ async function handleUploadRequest(options, fileType) {
       <div class="flex items-center justify-between mb-2">
         <span class="text-sm font-medium text-gray-700">
           数据文件
-          <span class="text-gray-400 text-xs">({{ sessionStore.dataFiles.length }})</span>
+          <span class="text-gray-400 text-xs">({{ tempDataFiles.length }})</span>
         </span>
         <n-upload
           :custom-request="(options) => handleUploadRequest(options, 'data')"
@@ -114,10 +114,10 @@ async function handleUploadRequest(options, fileType) {
         </n-upload>
       </div>
 
-      <n-scrollbar x-scrollable v-if="sessionStore.dataFiles.length > 0">
+      <n-scrollbar x-scrollable v-if="tempDataFiles.length > 0">
         <div class="flex gap-2 pb-1">
           <div
-            v-for="file in sessionStore.dataFiles"
+            v-for="file in tempDataFiles"
             :key="file.id"
             :class="[
               'flex items-center gap-2 px-3 py-1.5 rounded border text-sm',
@@ -151,7 +151,7 @@ async function handleUploadRequest(options, fileType) {
         <div class="flex items-center justify-between mb-2">
           <span class="text-sm font-medium text-gray-700">
             模板文件
-            <span class="text-gray-400 text-xs">({{ sessionStore.templateFiles.length }})</span>
+            <span class="text-gray-400 text-xs">({{ tempTemplateFiles.length }})</span>
           </span>
           <n-upload
             :custom-request="(options) => handleUploadRequest(options, 'template')"
@@ -164,10 +164,10 @@ async function handleUploadRequest(options, fileType) {
           </n-upload>
         </div>
 
-        <n-scrollbar x-scrollable v-if="sessionStore.templateFiles.length > 0">
+        <n-scrollbar x-scrollable v-if="tempTemplateFiles.length > 0">
           <div class="flex gap-2 pb-1">
             <div
-              v-for="file in sessionStore.templateFiles"
+              v-for="file in tempTemplateFiles"
               :key="file.id"
               :class="[
                 'flex items-center gap-2 px-3 py-1.5 rounded border text-sm',

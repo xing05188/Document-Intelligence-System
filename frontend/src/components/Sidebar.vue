@@ -9,14 +9,19 @@ const editingTitle = ref('')
 const savingTitle = ref(false)
 
 const sortedSessions = computed(() => {
-  return [...sessionStore.sessions].sort((a, b) =>
-    new Date(b.updated_at) - new Date(a.updated_at)
-  )
+  return [...sessionStore.sessions].sort((a, b) => {
+    const dateA = new Date(a.updated_at)
+    const dateB = new Date(b.updated_at)
+    const timeA = isNaN(dateA.getTime()) ? 0 : dateA.getTime()
+    const timeB = isNaN(dateB.getTime()) ? 0 : dateB.getTime()
+    return timeB - timeA
+  })
 })
 
 function formatTime(isoString) {
   if (!isoString) return ''
   const date = new Date(isoString)
+  if (isNaN(date.getTime())) return ''
   const now = new Date()
   const diff = now - date
   if (diff < 60000) return '刚刚'
@@ -68,6 +73,10 @@ async function saveRename(session) {
     <!-- 会话列表 -->
     <n-scrollbar class="flex-1">
       <div class="px-2 pb-2">
+        <!-- 加载中提示 -->
+        <div v-if="sessionStore.isInitializing && sessionStore.sessions.length === 0" class="text-center py-8 text-gray-400 text-sm">
+          加载会话...
+        </div>
         <div
           v-for="session in sortedSessions"
           :key="session.session_id"

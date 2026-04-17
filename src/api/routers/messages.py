@@ -97,7 +97,73 @@ def _resolve_file_reference(file_info: Dict[str, Any], cfg, session_id: str, kin
         except Exception:
             return storage_key
 
+    # 本地临时文件路径，直接返回
+    if Path(storage_key).exists():
+        return storage_key
+
     return storage_key
+
+
+def _ensure_files_in_db(files: List[Dict[str, Any]], session_id: str, cfg, user_id: Optional[str]) -> List[Dict[str, Any]]:
+    """
+    确保文件记录在数据库中。
+    如果文件是新的（storage_key 不在数据库中），则插入数据库并返回完整的文件信息（含 id）。
+    """
+    if not files:
+        return []
+
+    # 获取数据库中已有的文件
+    try:
+        db_files = get_session_files(session_id, config=cfg, user_id=user_id)
+        db_keys = {getattr(f, "storage_key", None) or f.file_path: f for f in db_files}
+    except Exception:
+        db_files = []
+        db_keys = {}
+
+    result = []
+    for f in files:
+        storage_key = f.get("storage_key") or ""
+        # 检查是否已在数据库中
+        if storage_key in db_keys:
+            db_file = db_keys[storage_key]
+            result.append({
+                "id": db_file.id,
+                "file_id": db_file.id,
+                "file_name": db_file.file_name,
+                "storage_key": getattr(db_file, "storage_key", None) or db_file.file_path,
+                "file_size": db_file.file_size,
+                "file_type": db_file.file_type,
+                "is_selected": True,
+            })
+        else:
+            # 新文件，存入数据库
+            file_name = f.get("file_name", "unnamed")
+            file_type = f.get("file_type", "data")
+            file_size = f.get("file_size", 0)
+
+            session_file = add_session_file(
+                session_id=session_id,
+                file_name=file_name,
+                file_type=file_type,
+                file_path=storage_key,
+                file_size=file_size,
+                config=cfg,
+                user_id=user_id,
+                source="upload",
+                role="source",
+                storage_key=storage_key,
+            )
+            result.append({
+                "id": session_file.id,
+                "file_id": session_file.id,
+                "file_name": session_file.file_name,
+                "storage_key": getattr(session_file, "storage_key", None) or session_file.file_path,
+                "file_size": session_file.file_size,
+                "file_type": session_file.file_type,
+                "is_selected": True,
+            })
+
+    return result
 
 
 def _flatten_table_filling_response(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -253,6 +319,10 @@ async def send_message(session_id: str, request: SendMessageRequest, authorizati
         db_template_files = list(request.template_files or [])
     else:
         db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
+
+    # 确保临时文件在数据库中有记录
+    db_data_files = _ensure_files_in_db(db_data_files, session_id, cfg, current_user.id if current_user else None)
+    db_template_files = _ensure_files_in_db(db_template_files, session_id, cfg, current_user.id if current_user else None)
 
     # 表格填表走直达执行核，避免聊天/会话链路与 tests/test_d/run.py 的逻辑偏离。
     if effective_mode == "table_filling":
@@ -418,7 +488,6 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         if matched:
                             files.append(matched)
                         elif cf.get('storage_key'):
-                            # 前端直接传了 storage_key（混合模式串行处理，清除选中状态后用）
                             files.append(cf)
                 else:
                     files = db_data_files
@@ -432,6 +501,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                             template_files.append(ct)
                 else:
                     template_files = db_template_files
+                # 确保临时文件在数据库中有记录
+                files = _ensure_files_in_db(files, session_id, cfg, current_user.id if current_user else None)
+                template_files = _ensure_files_in_db(template_files, session_id, cfg, current_user.id if current_user else None)
             elif mode == "table_filling":
                 # 表格填表模式走直达执行核，保证与 tests/test_d/run.py 同构。
                 db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
@@ -457,6 +529,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                             template_files.append(ct)
                 else:
                     template_files = db_template_files
+                # 确保临时文件在数据库中有记录
+                files = _ensure_files_in_db(files, session_id, cfg, current_user.id if current_user else None)
+                template_files = _ensure_files_in_db(template_files, session_id, cfg, current_user.id if current_user else None)
 
                 source_file, template_file = _pick_table_filling_inputs(files, template_files)
                 if source_file and template_file:
@@ -488,6 +563,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 template_files = client_templates
             else:
                 files, template_files = get_selected_session_files_payload(session_id, cfg)
+
+            # 确保临时文件在数据库中有记录
+            files = _ensure_files_in_db(files, session_id, cfg, current_user.id if current_user else None)
+            template_files = _ensure_files_in_db(template_files, session_id, cfg, current_user.id if current_user else None)
 
             user_meta: Dict[str, Any] = {"mode": mode}
             if files:
