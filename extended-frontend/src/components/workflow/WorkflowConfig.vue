@@ -42,6 +42,12 @@ function getFieldValue(field, node) {
   if (!node || !node.configValues) return null
   return node.configValues[field.key] ?? null
 }
+
+// 获取节点配置 Schema：优先用节点自带的 schema，否则从 nodeSchemas 按 id 查找
+function getNodeSchema(node) {
+  if (!node) return null
+  return node.schema || workflowStore.nodeSchemas[node.id] || null
+}
 </script>
 
 <template>
@@ -161,7 +167,7 @@ function getFieldValue(field, node) {
           </div>
           <div>
             <div class="node-config-title">{{ workflowStore.selectedNode.title }}</div>
-            <div class="node-config-subtitle">{{ workflowStore.nodeSchemas[workflowStore.selectedNodeId]?.subtitle }}</div>
+            <div class="node-config-subtitle">{{ getNodeSchema(workflowStore.selectedNode)?.subtitle }}</div>
           </div>
         </div>
 
@@ -169,7 +175,7 @@ function getFieldValue(field, node) {
         <div class="config-group">
           <div class="config-group-label">参数配置</div>
 
-          <template v-for="field in workflowStore.nodeSchemas[workflowStore.selectedNodeId]?.fields" :key="field.key">
+          <template v-for="field in getNodeSchema(workflowStore.selectedNode)?.fields" :key="field.key">
 
             <!-- Select -->
             <div v-if="field.type === 'select'" class="field">

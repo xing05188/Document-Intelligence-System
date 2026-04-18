@@ -10,7 +10,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const targetLanguage = ref('英文')
 
   // 当前选中的节点 ID
-  const selectedNodeId = ref('n1')
+  const selectedNodeId = ref(null)
 
   // 每个节点的配置值（key: nodeId, value: { paramKey: paramValue })
   const nodeConfigs = ref({})
@@ -62,121 +62,168 @@ export const useWorkflowStore = defineStore('workflow', () => {
 
   const toolboxItems = ref([
     { section: '输入', items: [
-      { icon: '📕', name: 'PDF 输入' },
-      { icon: '📝', name: 'MD 输入' },
-      { icon: '📊', name: 'XLSX 输入' },
-      { icon: '📘', name: 'DOCX 输入' }
+      { icon: '📕', name: 'PDF 输入', type: 'input', title: 'PDF 输入', body: '导入 PDF 文件', schema: {
+        icon: '📕', iconClass: 'input', subtitle: '输入节点',
+        fields: [
+          { key: 'inputLibrary', label: '输入文档库', type: 'select', options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
+          { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' },
+          { key: 'skipExisting', label: '跳过已处理文档', type: 'toggle' }
+        ]
+      }},
+      { icon: '📝', name: 'MD 输入', type: 'input', title: 'MD 输入', body: '导入 Markdown 文件', schema: {
+        icon: '📝', iconClass: 'input', subtitle: '输入节点',
+        fields: [
+          { key: 'inputLibrary', label: '输入文档库', type: 'select', options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
+          { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' }
+        ]
+      }},
+      { icon: '📊', name: 'XLSX 输入', type: 'input', title: 'XLSX 输入', body: '导入 Excel 表格数据', schema: {
+        icon: '📊', iconClass: 'input', subtitle: '输入节点',
+        fields: [
+          { key: 'inputLibrary', label: '输入文档库', type: 'select', options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
+          { key: 'sheetIndex', label: '工作表索引', type: 'input' },
+          { key: 'hasHeader', label: '首行为表头', type: 'toggle' }
+        ]
+      }},
+      { icon: '📘', name: 'DOCX 输入', type: 'input', title: 'DOCX 输入', body: '导入 Word 文档', schema: {
+        icon: '📘', iconClass: 'input', subtitle: '输入节点',
+        fields: [
+          { key: 'inputLibrary', label: '输入文档库', type: 'select', options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
+          { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' }
+        ]
+      }}
     ]},
     { section: '处理', items: [
-      { icon: '📖', name: '文档解析' },
-      { icon: '🎯', name: '实体提取' },
-      { icon: '✂️', name: '数据处理' }
+      { icon: '📖', name: '文档解析', type: 'parse', title: '文档解析', body: '提取文本、表格、图表结构化数据', schema: {
+        icon: '📖', iconClass: 'parse', subtitle: '处理节点',
+        fields: [
+          { key: 'parseMode', label: '解析模式', type: 'select', options: ['快速解析（仅文本）', '标准解析（文本+结构）', '深度解析（全量）'] },
+          { key: 'extractTables', label: '提取表格', type: 'toggle' },
+          { key: 'extractImages', label: '提取图片描述', type: 'toggle' },
+          { key: 'extractCharts', label: '提取图表数据', type: 'toggle' }
+        ]
+      }},
+      { icon: '🎯', name: '实体提取', type: 'parse', title: '实体提取', body: '使用 LLM 提取关键实体和关系', schema: {
+        icon: '🎯', iconClass: 'parse', subtitle: '处理节点',
+        fields: [
+          { key: 'model', label: '提取模型', type: 'select', options: ['GPT-4o (推荐)', 'GPT-4o-mini', 'Claude 3.5 Sonnet', 'DeepSeek V3'] },
+          { key: 'entityTypes', label: '实体类型', type: 'multiselect', options: ['人物', '组织', '地点', '时间', '金额', '事件', '术语'] },
+          { key: 'relationTypes', label: '关系类型', type: 'input' }
+        ]
+      }},
+      { icon: '✂️', name: '数据处理', type: 'parse', title: '数据处理', body: '清洗、转换、聚合数据', schema: {
+        icon: '✂️', iconClass: 'parse', subtitle: '处理节点',
+        fields: [
+          { key: 'processMode', label: '处理模式', type: 'select', options: ['清洗', '转换', '聚合', '过滤', '排序'] },
+          { key: 'processFields', label: '处理字段', type: 'input' }
+        ]
+      }},
+      { icon: '🤖', name: 'AI 翻译', type: 'ai', title: 'AI 翻译', body: '使用大模型进行智能翻译处理', schema: {
+        icon: '🤖', iconClass: 'ai', subtitle: 'AI 节点',
+        fields: [
+          { key: 'model', label: 'AI 模型', type: 'select', options: ['GPT-4o (推荐)', 'GPT-4o-mini', 'Claude 3.5 Sonnet', 'DeepSeek V3'] },
+          { key: 'prompt', label: '处理提示词', type: 'textarea' }
+        ]
+      }}
     ]},
     { section: '输出', items: [
-      { icon: '💾', name: '保存文件' },
-      { icon: '📁', name: '输出到文档库' },
+      { icon: '💾', name: '保存文件', type: 'output', title: '保存文件', body: '保存处理结果到本地文件', schema: {
+        icon: '💾', iconClass: 'output', subtitle: '输出节点',
+        fields: [
+          { key: 'savePath', label: '保存路径', type: 'input' },
+          { key: 'fileFormat', label: '文件格式', type: 'select', options: ['PDF', 'Word (.docx)', 'Excel (.xlsx)', 'Markdown', 'TXT'] }
+        ]
+      }},
+      { icon: '📁', name: '输出到文档库', type: 'output', title: '输出到文档库', body: '保存结果到指定文档库空间', schema: {
+        icon: '📁', iconClass: 'output', subtitle: '输出节点',
+        fields: [
+          { key: 'outputLibrary', label: '输出文档库', type: 'select', options: ['英文版论文', '翻译结果', '分析结果', '新建文档库...'] },
+          { key: 'namingRule', label: '文件命名规则', type: 'input' },
+          { key: 'metaTag', label: '自动打标签', type: 'input' },
+          { key: 'notifyOnComplete', label: '完成通知', type: 'toggle' }
+        ]
+      }}
     ]}
   ])
 
-  const canvasNodes = ref([
-    {
-      id: 'n1', type: 'input', icon: '📄', title: '文档输入',
-      body: '从文档库选择多个文档',
-      x: 30, y: 160,
-      configValues: {
-        inputLibrary: '论文翻译',
-        fileTypes: ['PDF', 'Word (.docx)'],
-        batchSize: 10,
-        skipExisting: true
-      }
-    },
-    {
-      id: 'n2', type: 'parse', icon: '📖', title: '文档解析',
-      body: '提取文本、表格、图表结构化数据',
-      x: 330, y: 160,
-      configValues: {
-        parseMode: '标准解析（文本+结构）',
-        extractTables: true,
-        extractImages: true,
-        extractCharts: false,
-        ocrLang: '自动检测'
-      }
-    },
-    {
-      id: 'n3', type: 'ai', icon: '🤖', title: 'LLM 翻译',
-      body: '使用大模型进行文档翻译',
-      x: 590, y: 160,
-      configValues: {
-        targetLang: '英文',
-        model: 'GPT-4o (推荐)',
-        style: '学术论文',
-        preserveFormat: true,
-        systemPrompt: '你是一位专业的学术翻译。请将以下文档翻译为英文，保持学术论文的风格和格式，特别注意专业术语的一致性。'
-      }
-    },
-    {
-      id: 'n4', type: 'output', icon: '📁', title: '输出到文档库',
-      body: '保存翻译结果到指定文档库空间',
-      x: 850, y: 160,
-      configValues: {
-        outputLibrary: '英文版论文',
-        namingRule: '{原名}_翻译',
-        metaTag: 'AI翻译,2026',
-        notifyOnComplete: true
-      }
-    }
-  ])
+  const canvasNodes = ref([])
 
   // 节点配置 Schema（定义每个节点的参数结构）
   const nodeSchemas = {
-    n1: {
-      icon: '📄', iconClass: 'input',
-      title: '文档输入', subtitle: 'Step 1 of 4 · 输入节点',
+    'schema-pdf': {
+      icon: '📕', iconClass: 'input',
+      title: 'PDF 输入', subtitle: '输入节点',
       fields: [
         { key: 'inputLibrary', label: '输入文档库', type: 'select',
           options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
-        { key: 'fileTypes', label: '文件类型', type: 'multiselect',
-          options: ['PDF', 'Word (.docx)', 'Excel (.xlsx)', 'PPT', 'TXT', 'Markdown'] },
         { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' },
         { key: 'skipExisting', label: '跳过已处理文档', type: 'toggle' }
       ]
     },
-    n2: {
-      icon: '📖', iconClass: 'parse',
-      title: '文档解析', subtitle: 'Step 2 of 4 · 处理节点',
+    'schema-md': {
+      icon: '📝', iconClass: 'input',
+      title: 'MD 输入', subtitle: '输入节点',
       fields: [
-        { key: 'parseMode', label: '解析模式', type: 'select',
-          options: ['快速解析（仅文本）', '标准解析（文本+结构）', '深度解析（全量）'] },
-        { key: 'extractTables', label: '提取表格', type: 'toggle' },
-        { key: 'extractImages', label: '提取图片描述', type: 'toggle' },
-        { key: 'extractCharts', label: '提取图表数据', type: 'toggle' },
-        { key: 'ocrLang', label: 'OCR 语言', type: 'select',
-          options: ['自动检测', '简体中文', '英文', '日文', '韩文', '多语言'] }
+        { key: 'inputLibrary', label: '输入文档库', type: 'select',
+          options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
+        { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' }
       ]
     },
-    n3: {
-      icon: '🤖', iconClass: 'ai',
-      title: 'LLM 翻译', subtitle: 'Step 3 of 4 · AI 节点',
+    'schema-xlsx': {
+      icon: '📊', iconClass: 'input',
+      title: 'XLSX 输入', subtitle: '输入节点',
       fields: [
-        { key: 'targetLang', label: '目标语言', type: 'select',
-          options: ['英文', '中文', '日文', '韩文', '法文', '德文', '西班牙文'] },
-        { key: 'model', label: '翻译模型', type: 'select',
+        { key: 'inputLibrary', label: '输入文档库', type: 'select',
+          options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
+        { key: 'sheetIndex', label: '工作表索引', type: 'input' },
+        { key: 'hasHeader', label: '首行为表头', type: 'toggle' }
+      ]
+    },
+    'schema-docx': {
+      icon: '📘', iconClass: 'input',
+      title: 'DOCX 输入', subtitle: '输入节点',
+      fields: [
+        { key: 'inputLibrary', label: '输入文档库', type: 'select',
+          options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
+        { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' }
+      ]
+    },
+    'schema-extract': {
+      icon: '🎯', iconClass: 'parse',
+      title: '实体提取', subtitle: '处理节点',
+      fields: [
+        { key: 'model', label: '提取模型', type: 'select',
           options: ['GPT-4o (推荐)', 'GPT-4o-mini', 'Claude 3.5 Sonnet', 'DeepSeek V3'] },
-        { key: 'style', label: '翻译风格', type: 'select',
-          options: ['学术论文', '商务正式', '通俗易懂', '保留原文风格'] },
-        { key: 'preserveFormat', label: '保留原文格式', type: 'toggle' },
-        { key: 'systemPrompt', label: '系统提示词', type: 'textarea' }
+        { key: 'entityTypes', label: '实体类型', type: 'multiselect',
+          options: ['人物', '组织', '地点', '时间', '金额', '事件', '术语'] },
+        { key: 'relationTypes', label: '关系类型', type: 'input' }
       ]
     },
-    n4: {
-      icon: '📁', iconClass: 'output',
-      title: '输出到文档库', subtitle: 'Step 4 of 4 · 输出节点',
+    'schema-process': {
+      icon: '✂️', iconClass: 'parse',
+      title: '数据处理', subtitle: '处理节点',
       fields: [
-        { key: 'outputLibrary', label: '输出文档库', type: 'select',
-          options: ['英文版论文', '翻译结果', '分析结果', '新建文档库...'] },
-        { key: 'namingRule', label: '文件命名规则', type: 'input' },
-        { key: 'metaTag', label: '自动打标签', type: 'input' },
-        { key: 'notifyOnComplete', label: '完成通知', type: 'toggle' }
+        { key: 'processMode', label: '处理模式', type: 'select',
+          options: ['清洗', '转换', '聚合', '过滤', '排序'] },
+        { key: 'processFields', label: '处理字段', type: 'input' }
+      ]
+    },
+    'schema-ai': {
+      icon: '🤖', iconClass: 'ai',
+      title: 'AI 翻译', subtitle: 'AI 节点',
+      fields: [
+        { key: 'model', label: 'AI 模型', type: 'select',
+          options: ['GPT-4o (推荐)', 'GPT-4o-mini', 'Claude 3.5 Sonnet', 'DeepSeek V3'] },
+        { key: 'prompt', label: '处理提示词', type: 'textarea' }
+      ]
+    },
+    'schema-save': {
+      icon: '💾', iconClass: 'output',
+      title: '保存文件', subtitle: '输出节点',
+      fields: [
+        { key: 'savePath', label: '保存路径', type: 'input' },
+        { key: 'fileFormat', label: '文件格式', type: 'select',
+          options: ['PDF', 'Word (.docx)', 'Excel (.xlsx)', 'Markdown', 'TXT'] }
       ]
     }
   }
@@ -210,6 +257,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     }
     currentWorkflowId.value = id
     workflowName.value = '新建工作流'
+    canvasNodes.value = []
+    selectedNodeId.value = null
   }
 
   function setSearchQuery(query) {
@@ -244,6 +293,38 @@ export const useWorkflowStore = defineStore('workflow', () => {
     }
   }
 
+  function addNode(type, icon, title, body, schema) {
+    const id = 'n' + Date.now()
+    const lastNode = canvasNodes.value[canvasNodes.value.length - 1]
+    const x = lastNode ? lastNode.x + 260 : 30
+    const y = lastNode ? lastNode.y : 160
+    const newNode = {
+      id,
+      type,
+      icon,
+      title,
+      body,
+      x,
+      y,
+      configValues: {},
+      schema: schema || null
+    }
+    canvasNodes.value.push(newNode)
+    selectedNodeId.value = id
+    return id
+  }
+
+  function deleteNode(nodeId) {
+    const idx = canvasNodes.value.findIndex(n => n.id === nodeId)
+    if (idx === -1) return
+    canvasNodes.value.splice(idx, 1)
+    if (selectedNodeId.value === nodeId) {
+      selectedNodeId.value = canvasNodes.value.length > 0
+        ? canvasNodes.value[Math.min(idx, canvasNodes.value.length - 1)].id
+        : null
+    }
+  }
+
   const selectedNode = computed(() =>
     canvasNodes.value.find(n => n.id === selectedNodeId.value)
   )
@@ -272,6 +353,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     updateWorkflowName,
     selectNode,
     updateNodePosition,
-    updateNodeConfig
+    updateNodeConfig,
+    addNode,
+    deleteNode
   }
 })

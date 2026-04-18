@@ -4,8 +4,6 @@ import { useWorkflowStore } from '../../stores/workflowStore'
 
 const workflowStore = useWorkflowStore()
 
-const currentTool = ref('select')
-
 // Transform-based pan state
 const pan = ref({ x: 0, y: 0 })
 const isPanning = ref(false)
@@ -21,20 +19,14 @@ const isDraggingNode = ref(false)
 const dragNodeId = ref(null)
 const dragStart = ref({ mouseX: 0, mouseY: 0, nodeX: 0, nodeY: 0 })
 
-const tools = [
-  { id: 'select', icon: '◻', title: '选择' },
-  { id: 'connect', icon: '⬡', title: '连接' },
-  { id: 'undo', icon: '↩', title: '撤销' },
-  { id: 'redo', icon: '↪', title: '重做' }
-]
-
-function selectTool(toolId) {
-  currentTool.value = toolId
-}
-
 function handleNodeClick(event, nodeId) {
   event.stopPropagation()
   workflowStore.selectNode(nodeId)
+}
+
+function handleNodeDelete(event, nodeId) {
+  event.stopPropagation()
+  workflowStore.deleteNode(nodeId)
 }
 
 // Canvas pan
@@ -94,10 +86,6 @@ function handleCanvasClick(event) {
   }
 }
 
-function runWorkflow() {
-  console.log('Running workflow...')
-}
-
 // 预计算连接线数据
 const connPaths = computed(() => {
   const nodes = workflowStore.canvasNodes
@@ -124,21 +112,6 @@ const selectedIndex = computed(() => {
 
 <template>
   <div class="workflow-canvas">
-    <!-- Toolbar -->
-    <div class="canvas-toolbar">
-      <button
-        v-for="tool in tools"
-        :key="tool.id"
-        class="canvas-tool"
-        :class="{ active: currentTool === tool.id }"
-        :title="tool.title"
-        @click="selectTool(tool.id)"
-      >
-        {{ tool.icon }}
-      </button>
-      <button class="canvas-tool run-btn" title="运行工作流" @click="runWorkflow">▶</button>
-    </div>
-
     <!-- Canvas Area -->
     <div
       class="canvas-area"
@@ -199,6 +172,11 @@ const selectedIndex = computed(() => {
             <div class="node-icon" :class="'type-' + node.type">{{ node.icon }}</div>
             <span class="node-title">{{ node.title }}</span>
             <span class="node-step-tag">Step {{ i + 1 }}</span>
+            <button
+              class="node-delete-btn"
+              title="删除节点"
+              @click.stop="handleNodeDelete($event, node.id)"
+            >×</button>
           </div>
           <div class="node-body">{{ node.body }}</div>
           <div class="node-port output-port"></div>
