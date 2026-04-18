@@ -18,6 +18,10 @@ function handleNewWorkflow() {
 function handleSearch(e) {
   workflowStore.setSearchQuery(e.target.value)
 }
+
+function handleAddNode(item) {
+  workflowStore.addNode(item.type, item.icon, item.title, item.body, item.schema)
+}
 </script>
 
 <template>
@@ -125,6 +129,7 @@ function handleSearch(e) {
           >
             <div class="toolbox-item-icon">{{ item.icon }}</div>
             <span class="toolbox-item-name">{{ item.name }}</span>
+            <button class="toolbox-item-add" title="添加到画布" @click.stop="handleAddNode(item)">+</button>
           </div>
         </div>
       </div>
