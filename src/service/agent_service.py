@@ -175,12 +175,22 @@ class AgentService:
         self.config = config or get_config()
         self.coordinator = WorkflowCoordinator(self.config)
 
-    async def _stream_sync_generator(self, gen: Generator) -> AsyncGenerator[str, None]:
+    async def _stream_sync_generator(self, gen):
         """
         将同步生成器包装为异步生成器，逐项 yield。
         用于在异步上下文中使用 DocumentAgent 的 stream_chat()。
+        关键：必须在后台线程中运行同步生成器，否则会阻塞事件循环。
         """
-        for item in gen:
+        loop = asyncio.get_event_loop()
+        def get_next():
+            try:
+                return next(gen)
+            except StopIteration:
+                return None
+        while True:
+            item = await loop.run_in_executor(None, get_next)
+            if item is None:
+                break
             yield item
 
     async def _get_document_agent(
@@ -228,6 +238,13 @@ class AgentService:
 
         # 文档理解模式：每次都基于当前勾选的文件回答
         if mode == "document_understanding":
+            agent = await self._get_document_agent(session_id, content, files)
+            async for part in self._stream_sync_generator(agent.stream_chat(content)):
+                yield part
+            return
+
+        # 文档编辑模式：基于文档进行编辑操作，同样使用流式输出
+        if mode == "document_editing":
             agent = await self._get_document_agent(session_id, content, files)
             async for part in self._stream_sync_generator(agent.stream_chat(content)):
                 yield part

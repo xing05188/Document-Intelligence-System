@@ -66,6 +66,7 @@ export const useSessionStore = defineStore('session', () => {
   const sidebarCollapsed = ref(false)
   const ws = ref(null)
   const wsConnecting = ref(false)
+  const wsSessionId = ref(null) // 追踪当前 WebSocket 连接对应的 session_id
 
   // 进度条相关（混合模式/实体提取/表格填表）
   const progressValue = ref(0)
@@ -75,6 +76,8 @@ export const useSessionStore = defineStore('session', () => {
   // WebSocket 回调（用于混合模式多任务处理）
   let pendingResolve = null
   let pendingResultData = null
+  let loadingMsgId = null // 当前 loading 消息的 ID
+  let isSending = false // 标记是否正在发送消息
 
   // 模式相关
   const currentMode = ref('default_conversation')
@@ -312,11 +315,10 @@ export const useSessionStore = defineStore('session', () => {
       updated_at: new Date().toISOString(),
     }
     sessions.value.unshift(newSession)
-    currentSessionId.value = tempId
     messages.value = []
-    connectWebSocket()
 
     try {
+      // 先创建会话，获取真正的 session_id
       const res = await sessionApi.create({ title: '新会话', current_mode: 'default_conversation' })
       const idx = sessions.value.findIndex(s => s.session_id === tempId)
       if (idx !== -1) {
@@ -328,6 +330,8 @@ export const useSessionStore = defineStore('session', () => {
       // 加载新会话的文件列表（为空）
       loadFiles(res.session_id).catch(console.error)
       saveSessionsCache(sessions.value, res.session_id)
+      // 在真正的 session_id 确定后再连接 WebSocket
+      connectWebSocket()
     } catch (e) {
       console.error('创建会话失败:', e)
       sessions.value = sessions.value.filter(s => s.session_id !== tempId)
@@ -435,22 +439,79 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
-  function connectWebSocket() {
-    if (!currentSessionId.value) return
+  async function connectWebSocket(targetSessionId = null) {
+    // 如果没有指定 sessionId，使用当前的
+    const sessionId = targetSessionId || currentSessionId.value
+    
+    // 跳过临时 ID（会话尚未在服务器上创建）
+    if (!sessionId || sessionId.startsWith('temp_')) {
+      console.log('[connectWebSocket] 跳过临时 session_id:', sessionId)
+      return
+    }
 
-    if (wsConnecting.value) return
+    // 如果有连接正在进行，等待它完成后再继续
+    if (wsConnecting.value) {
+      console.log('[connectWebSocket] 等待现有连接完成...')
+      const result = await waitForWebSocketOpen(3000)
+      // 等待后再次检查
+      if (ws.value && wsSessionId.value === sessionId && ws.value.readyState === WebSocket.OPEN) {
+        console.log('[connectWebSocket] 等待后连接已就绪')
+        return
+      }
+      // 如果等待后连接已关闭或失败，重置状态
+      if (!ws.value || ws.value.readyState === WebSocket.CLOSED) {
+        console.log('[connectWebSocket] 等待后发现连接已关闭，重置状态')
+        wsConnecting.value = false
+        ws.value = null
+        wsSessionId.value = null
+      }
+    }
 
+    // 如果已有活跃连接且 session_id 相同，不再创建新连接
+    if (ws.value && wsSessionId.value === sessionId) {
+      if (ws.value.readyState === WebSocket.OPEN) {
+        console.log('[connectWebSocket] 已存在相同 session_id 的 OPEN 连接，保持不变')
+        return
+      }
+      if (ws.value.readyState === WebSocket.CONNECTING) {
+        console.log('[connectWebSocket] 相同 session_id 正在连接中，等待...')
+        await waitForWebSocketOpen(5000)
+        return
+      }
+      // 连接已关闭或失败
+      if (ws.value.readyState === WebSocket.CLOSED) {
+        console.log('[connectWebSocket] 旧连接已关闭')
+        ws.value = null
+        wsSessionId.value = null
+      }
+    }
+
+    // 如果有正在发送的连接，不要关闭它
+    if (isSending && ws.value && ws.value.readyState === WebSocket.OPEN) {
+      console.log('[connectWebSocket] 正在发送中，跳过关闭连接')
+      return
+    }
+
+    // 如果有现有连接，先关闭
     if (ws.value) {
+      console.log('[connectWebSocket] 关闭旧连接')
       ws.value.onclose = null
       ws.value.onerror = null
-      ws.value.close()
+      try {
+        ws.value.close()
+      } catch (e) {
+        console.warn('[connectWebSocket] 关闭旧连接失败:', e)
+      }
       ws.value = null
+      wsSessionId.value = null
     }
 
     isStreaming.value = false
     wsConnecting.value = true
+    wsSessionId.value = sessionId
+    console.log('[connectWebSocket] 创建新连接, session_id:', wsSessionId.value)
 
-    ws.value = messageApi.connect(currentSessionId.value)
+    ws.value = messageApi.connect(sessionId)
 
     ws.value.onmessage = (event) => {
       console.log('[WebSocket onmessage] 收到消息:', event.data)
@@ -479,6 +540,14 @@ export const useSessionStore = defineStore('session', () => {
       } else if (data.type === 'chunk') {
         console.log('[WebSocket onmessage] type=chunk, result_type:', data.result_type, 'content长度:', data.content?.length)
         isStreaming.value = false
+        // 删除 loading 消息（如果存在）
+        if (loadingMsgId !== null) {
+          const idx = messages.value.findIndex(m => m.id === loadingMsgId)
+          if (idx > -1) {
+            messages.value.splice(idx, 1)
+          }
+          loadingMsgId = null
+        }
         // 实体提取结果处理
         if (data.result_type === 'entity_extraction') {
           try {
@@ -542,6 +611,7 @@ export const useSessionStore = defineStore('session', () => {
       } else if (data.type === 'done') {
         console.log('[WebSocket onmessage] type=done, pendingResolve:', !!pendingResolve, 'generated_files:', data.generated_files)
         isStreaming.value = false
+        isSending = false
         showProgressBar.value = false
         progressValue.value = 100
         progressMessage.value = '处理完成'
@@ -571,6 +641,7 @@ export const useSessionStore = defineStore('session', () => {
         const errorMsg = typeof data.message === 'string' ? data.message : JSON.stringify(data.message)
         console.error('[WebSocket onmessage] type=error:', errorMsg, 'pendingResolve:', !!pendingResolve)
         isStreaming.value = false
+        isSending = false
         showProgressBar.value = false
         if (pendingResolve) {
           pendingResolve({ success: false, error: errorMsg })
@@ -583,16 +654,20 @@ export const useSessionStore = defineStore('session', () => {
     }
 
     ws.value.onclose = () => {
-      console.log('[WebSocket onclose] 连接已关闭, pendingResolve:', !!pendingResolve)
+      console.log('[WebSocket onclose] 连接已关闭, session_id:', wsSessionId.value, 'pendingResolve:', !!pendingResolve)
       ws.value = null
+      wsSessionId.value = null
       isStreaming.value = false
+      isSending = false
       wsConnecting.value = false
     }
 
     ws.value.onerror = (err) => {
       console.warn('[WebSocket onerror] 连接失败:', err, 'pendingResolve:', !!pendingResolve)
       ws.value = null
+      wsSessionId.value = null
       isStreaming.value = false
+      isSending = false
       wsConnecting.value = false
       if (pendingResolve) {
         console.log('[WebSocket onerror] 通过 pendingResolve 报告失败')
@@ -603,7 +678,7 @@ export const useSessionStore = defineStore('session', () => {
     }
 
     ws.value.onopen = () => {
-      console.log('[WebSocket] onopen - 连接已建立')
+      console.log('[WebSocket] onopen - 连接已建立, session_id:', wsSessionId.value)
       wsConnecting.value = false
     }
 
@@ -619,6 +694,7 @@ export const useSessionStore = defineStore('session', () => {
     if (ws.value) {
       ws.value.close()
       ws.value = null
+      wsSessionId.value = null
     }
     isStreaming.value = false
   }
@@ -627,7 +703,7 @@ export const useSessionStore = defineStore('session', () => {
     sidebarCollapsed.value = !sidebarCollapsed.value
   }
 
-  function waitForWebSocketOpen(maxMs = 8000) {
+  async function waitForWebSocketOpen(maxMs = 8000) {
     return new Promise((resolve) => {
       const socket = ws.value
       if (!socket) {
@@ -641,10 +717,16 @@ export const useSessionStore = defineStore('session', () => {
         resolve(true)
         return
       }
+      if (socket.readyState === WebSocket.CLOSED) {
+        console.log('[waitForWebSocketOpen] 连接已关闭，重置状态')
+        wsConnecting.value = false
+        ws.value = null
+        wsSessionId.value = null
+        resolve(false)
+        return
+      }
       if (socket.readyState === WebSocket.CONNECTING) {
         console.log('[waitForWebSocketOpen] 等待 CONNECTING...')
-        setTimeout(() => resolve(waitForWebSocketOpen(maxMs)), 50)
-        return
       }
       const start = Date.now()
       const t = setInterval(() => {
@@ -663,7 +745,10 @@ export const useSessionStore = defineStore('session', () => {
         }
         if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
           clearInterval(t)
-          console.log('[waitForWebSocketOpen] 已 CLOSED/CLOSING')
+          console.log('[waitForWebSocketOpen] 已 CLOSED/CLOSING，重置状态')
+          wsConnecting.value = false
+          ws.value = null
+          wsSessionId.value = null
           resolve(false)
           return
         }
@@ -761,10 +846,31 @@ export const useSessionStore = defineStore('session', () => {
 
     console.log('[sendToBackend] 发送请求:', { sessionId, content, mode, files, template_files })
     
-    const canStream = await waitForWebSocketOpen()
-    if (ws.value && ws.value.readyState === WebSocket.OPEN && canStream) {
-      console.log('[sendToBackend] 通过 WebSocket 发送')
+    // 添加助手 loading 消息（立即显示）
+    loadingMsgId = Date.now()
+    messages.value.push({
+      id: loadingMsgId,
+      role: 'assistant',
+      content: '',
+      created_at: new Date().toISOString(),
+      isLoading: true,
+    })
+    
+    // 检查 WebSocket 连接是否匹配当前 session
+    let canStream = await waitForWebSocketOpen(5000) // 等待最多 5 秒
+    const wsMatch = ws.value && wsSessionId.value === sessionId
+    
+    // 如果需要但没有匹配的 WebSocket 连接，建立新连接
+    if (!wsMatch || !canStream) {
+      console.log('[sendToBackend] 建立 WebSocket 连接, sessionId:', sessionId)
+      connectWebSocket(sessionId)
+      canStream = await waitForWebSocketOpen(5000)
+    }
+    
+    if (wsMatch && canStream && ws.value && ws.value.readyState === WebSocket.OPEN && wsSessionId.value === sessionId) {
+      console.log('[sendToBackend] 通过 WebSocket 发送, session_id:', sessionId)
       clearAllSelectedFiles()
+      isSending = true
       ws.value.send(JSON.stringify({
         content,
         mode,
@@ -772,7 +878,7 @@ export const useSessionStore = defineStore('session', () => {
         template_files,
       }))
     } else {
-      console.log('[sendToBackend] 通过 API 发送')
+      console.log('[sendToBackend] 通过 API 发送, wsMatch:', wsMatch, 'canStream:', canStream)
       clearAllSelectedFiles()
       try {
         await messageApi.send(sessionId, {
@@ -792,6 +898,7 @@ export const useSessionStore = defineStore('session', () => {
         })
       } finally {
         isStreaming.value = false
+        isSending = false
       }
     }
   }
@@ -835,21 +942,31 @@ export const useSessionStore = defineStore('session', () => {
     const docFiles = files.filter(f => getFileCategory(f.file_name) === 'document')
     const excelFiles = files.filter(f => getFileCategory(f.file_name) === 'excel')
 
-    // 无文件或纯文本：直接发送
+    // 无文件或纯文本：通过 WebSocket 流式发送
     if (docFiles.length === 0 && excelFiles.length === 0) {
-      isStreaming.value = true
-      try {
-        await messageApi.send(currentSessionId.value, {
+      const canStream = await waitForWebSocketOpen()
+      if (ws.value && ws.value.readyState === WebSocket.OPEN && canStream) {
+        isStreaming.value = true
+        clearAllSelectedFiles()
+        ws.value.send(JSON.stringify({
           content: content.trim(),
           mode: 'mixed',
           files: files,
           template_files: template_files,
-        })
-        await loadMessages(currentSessionId.value)
-      } catch (e) {
-        console.error('发送消息失败:', e)
-      } finally {
-        isStreaming.value = false
+        }))
+      } else {
+        // WebSocket 不可用，fallback 到 REST API
+        try {
+          await messageApi.send(currentSessionId.value, {
+            content: content.trim(),
+            mode: 'mixed',
+            files: files,
+            template_files: template_files,
+          })
+          await loadMessages(currentSessionId.value)
+        } catch (e) {
+          console.error('发送消息失败:', e)
+        }
       }
       return
     }
@@ -978,6 +1095,20 @@ export const useSessionStore = defineStore('session', () => {
 
     try {
       await loadSessions()
+      // 检查当前 session_id 是否仍然存在于服务器上
+      if (currentSessionId.value) {
+        const exists = sessions.value.some(s => s.session_id === currentSessionId.value)
+        if (!exists) {
+          // 当前 session_id 不存在，选择第一个会话
+          if (sessions.value.length > 0) {
+            currentSessionId.value = sessions.value[0].session_id
+            console.log('[init] 原session_id不存在，选择第一个会话:', currentSessionId.value)
+          } else {
+            currentSessionId.value = null
+            console.log('[init] 无可用会话')
+          }
+        }
+      }
     } catch (e) {
       console.warn('[init] loadSessions失败:', e)
     }
