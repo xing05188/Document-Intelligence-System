@@ -1,14 +1,26 @@
 <script setup>
 import { NConfigProvider, NMessageProvider, NDialogProvider } from 'naive-ui'
-import { ref } from 'vue'
+import { onMounted, ref, computed } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import ChatArea from './components/ChatArea.vue'
 import ModeSelector from './components/ModeSelector.vue'
 import FilePanel from './components/FilePanel.vue'
+import AuthPanel from './components/AuthPanel.vue'
 import { useSessionStore } from './stores/sessionStore'
 
 const sessionStore = useSessionStore()
-sessionStore.init()
+const showFilePanel = computed(() => {
+  return sessionStore.currentModeConfig.requiresData !== false ||
+         sessionStore.currentModeConfig.requiresTemplate !== false
+})
+
+const filePanelCollapsed = ref(false)
+function toggleFilePanel() {
+  filePanelCollapsed.value = !filePanelCollapsed.value
+}
+onMounted(() => {
+  sessionStore.init()
+})
 
 const themeOverrides = {
   common: {
@@ -18,9 +30,18 @@ const themeOverrides = {
 }
 
 const sidebarCollapsed = ref(false)
+const userDisplayName = computed(() => {
+  const u = sessionStore.currentUser
+  if (!u) return ''
+  return u.display_name || u.phone
+})
 
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
+}
+
+async function handleLogout() {
+  await sessionStore.logout()
 }
 </script>
 
@@ -28,7 +49,8 @@ function toggleSidebar() {
   <n-config-provider :theme-overrides="themeOverrides">
     <n-message-provider>
       <n-dialog-provider>
-        <div class="h-screen flex">
+        <AuthPanel v-if="!sessionStore.isAuthenticated && !sessionStore.isInitializing" />
+        <div v-else class="h-screen flex">
           <!-- 侧边栏（展开） -->
           <transition name="sidebar-expand">
             <aside
@@ -81,18 +103,60 @@ function toggleSidebar() {
           <!-- 主内容区 -->
           <main class="flex-1 flex flex-col min-w-0">
             <!-- 模式选择器 -->
-            <div class="border-b bg-white px-4 py-3">
-              <ModeSelector />
-            </div>
-
-            <!-- 文件面板 -->
-            <div class="border-b bg-gray-50 px-4 py-3 max-h-48 overflow-y-auto">
-              <FilePanel />
+            <div class="border-b bg-white px-4 py-3 flex items-center justify-between gap-3">
+              <div class="min-w-0 flex-1">
+                <ModeSelector />
+              </div>
+              <div class="shrink-0 flex items-center gap-3">
+                <div class="hidden sm:block text-right">
+                  <div class="text-xs text-gray-500">当前账号</div>
+                  <div class="text-sm text-gray-700 max-w-44 truncate">{{ userDisplayName }}</div>
+                </div>
+                <button
+                  class="px-3 py-1.5 text-xs rounded-md bg-emerald-50 text-emerald-700 hover:bg-emerald-100 hover:text-emerald-900 transition-colors"
+                  @click="handleLogout"
+                >
+                  退出登录
+                </button>
+              </div>
             </div>
 
             <!-- 聊天区域 -->
-            <div class="flex-1 overflow-hidden">
+            <div class="flex-1 overflow-hidden flex flex-col">
               <ChatArea />
+            </div>
+
+            <!-- 文件面板（底部，可折叠） -->
+            <div v-if="showFilePanel" class="border-t bg-gray-50">
+              <!-- 折叠/展开按钮 -->
+              <div class="flex items-center px-4 py-2">
+                <button
+                  @click="toggleFilePanel"
+                  class="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 transition-colors"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    class="w-4 h-4 transition-transform duration-200"
+                    :class="{ 'rotate-180': filePanelCollapsed }"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <polyline points="6 9 12 15 18 9"/>
+                  </svg>
+                  <span>文件上传</span>
+                </button>
+              </div>
+              <!-- 文件面板内容 -->
+              <div
+                v-show="!filePanelCollapsed"
+                class="px-4 pb-3 max-h-48 overflow-y-auto"
+              >
+                <FilePanel />
+              </div>
             </div>
           </main>
         </div>
