@@ -94,6 +94,20 @@ function handleInputSourceChange(value) {
   updateConfig('inputSource', value)
 }
 
+// 下载输出文件
+function downloadFile(file) {
+  let url
+  if (file.blob_name) {
+    url = `/api/files/download-by-blob?blob_name=${encodeURIComponent(file.blob_name)}`
+  } else {
+    url = `/api/files/download?path=${encodeURIComponent(file.path)}`
+  }
+  const a = document.createElement('a')
+  a.href = url
+  a.download = file.name
+  a.click()
+}
+
 // 选择文档库空间
 function handleSpaceChange(spaceId) {
   updateConfig('spaceId', spaceId)
@@ -699,6 +713,20 @@ const filteredFields = computed(() => {
             >{{ log.message }}</div>
           </div>
         </div>
+
+        <!-- Output Files Download -->
+        <div v-if="workflowStore.outputFiles.length > 0 && !workflowStore.isExecuting" class="output-files-section">
+          <div class="output-files-title">输出文件</div>
+          <div
+            v-for="f in workflowStore.outputFiles"
+            :key="f.path"
+            class="output-file-item"
+          >
+            <span class="output-file-name">{{ f.name }}</span>
+            <span class="output-file-size">{{ (f.size / 1024).toFixed(1) }} KB</span>
+            <button class="output-download-btn" @click="downloadFile(f)">下载</button>
+          </div>
+        </div>
       </div>
 
       <!-- ======== 无选中节点 — 空状态 ======== -->
@@ -1136,6 +1164,62 @@ const filteredFields = computed(() => {
   gap: 6px;
   max-height: 120px;
   overflow-y: auto;
+}
+
+.output-files-section {
+  margin-top: 16px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 12px;
+}
+
+.output-files-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.output-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  margin-bottom: 6px;
+}
+
+.output-file-name {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.output-file-size {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.output-download-btn {
+  padding: 4px 12px;
+  border-radius: 4px;
+  background: var(--accent-primary);
+  color: #fff;
+  border: none;
+  font-size: 12px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+  white-space: nowrap;
+}
+
+.output-download-btn:hover {
+  opacity: 0.85;
 }
 
 .exec-log-item {

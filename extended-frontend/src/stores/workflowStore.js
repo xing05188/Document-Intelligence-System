@@ -42,8 +42,6 @@ export const useWorkflowStore = defineStore('workflow', () => {
   ])
   const outputFormats = ref([
     { code: 'pdf', label: 'PDF' },
-    { code: 'docx', label: 'Word (.docx)' },
-    { code: 'xlsx', label: 'Excel (.xlsx)' },
     { code: 'md', label: 'Markdown' },
     { code: 'txt', label: 'TXT' },
   ])
@@ -179,6 +177,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const isExecuting = ref(false)
   const executionProgress = ref(0)
   const executionLogs = ref([])
+  const outputFiles = ref([])
 
   // ==================== 计算属性 ====================
 
@@ -455,6 +454,23 @@ export const useWorkflowStore = defineStore('workflow', () => {
     executionLogs.value = []
 
     try {
+      // 将本地文件转为 base64 发送（逐字节避免栈溢出）
+      const localFilePayloads = await Promise.all(
+        localFiles.value.map(async f => {
+          if (f.file && f.file.arrayBuffer) {
+            const buffer = await f.file.arrayBuffer()
+            const bytes = new Uint8Array(buffer)
+            let binary = ''
+            for (let i = 0; i < bytes.length; i++) {
+              binary += String.fromCharCode(bytes[i])
+            }
+            const base64 = btoa(binary)
+            return { name: f.name, size: f.size, content: base64 }
+          }
+          return { name: f.name, size: f.size }
+        })
+      )
+
       // 收集执行参数
       const params = {
         workflowId: currentWorkflowId.value,
@@ -465,7 +481,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
           configValues: n.configValues
         })),
         docs: selectedDocs.value.map(d => d.id),
-        localFiles: localFiles.value.map(f => ({ name: f.name, size: f.size }))
+        localFiles: localFilePayloads
       }
 
       const res = await workflowApi.execute(params)
@@ -481,23 +497,34 @@ export const useWorkflowStore = defineStore('workflow', () => {
   }
 
   async function pollExecution(executionId) {
-    const maxPolls = 60
+    const maxPolls = 120
     let polls = 0
+    let lastLogCount = 0
     while (polls < maxPolls) {
       try {
         const res = await workflowApi.getExecutionStatus(executionId)
         const status = res?.status
         if (status === 'completed') {
           executionProgress.value = 100
-          executionLogs.value.push({ type: 'done', message: '翻译完成' })
+          // 追加 output_files
+          if (res.output_files && res.output_files.length > 0) {
+            res.output_files.forEach(f => {
+              executionLogs.value.push({ type: 'done', message: `📥 ${f.name}` })
+            })
+            outputFiles.value = res.output_files
+          }
+          executionLogs.value.push({ type: 'done', message: `全部完成，共 ${res.output_files?.length || 0} 个输出文件` })
           break
         } else if (status === 'failed') {
           executionLogs.value.push({ type: 'error', message: res?.error || '执行失败' })
           break
         } else {
-          executionProgress.value = res?.progress || executionProgress.value
-          if (res?.logs) {
-            res.logs.forEach(log => executionLogs.value.push(log))
+          executionProgress.value = res.progress || Math.round((res.current_file_index / Math.max(res.total_files, 1)) * 100)
+          // 只追加新日志（服务器返回完整历史）
+          if (res.logs && res.logs.length > lastLogCount) {
+            const newLogs = res.logs.slice(lastLogCount)
+            newLogs.forEach(log => executionLogs.value.push(log))
+            lastLogCount = res.logs.length
           }
         }
       } catch (e) {
@@ -642,6 +669,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     isExecuting,
     executionProgress,
     executionLogs,
+    outputFiles,
     // 计算属性
     currentWorkflow,
     customWorkflows,
