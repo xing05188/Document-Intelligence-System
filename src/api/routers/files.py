@@ -316,11 +316,48 @@ async def download_file(session_id: str, file_id: int, authorization: Optional[s
 download_router = APIRouter(prefix="/api/files", tags=["文件下载"])
 
 
+@download_router.get("/download-by-blob")
+async def download_by_blob(blob_name: str, authorization: Optional[str] = Header(default=None)):
+    """从 Azure Blob Storage 下载文件。"""
+    cfg = load_config()
+    current_user = _resolve_current_user(authorization, cfg)
+    if not cfg.storage.enabled or cfg.storage.provider != "azure_blob":
+        raise HTTPException(status_code=503, detail="Blob 存储未启用")
+
+    # 允许 workflows / sessions 前缀的 blob
+    allowed_prefixes = (cfg.storage.azure_blob_prefix or "sessions").split(",")
+    safe_prefixes = tuple(p.strip() for p in allowed_prefixes) + ("sessions", "workflows")
+    if not any(blob_name.startswith(sp) for sp in safe_prefixes):
+        raise HTTPException(status_code=403, detail="不允许访问该 Blob")
+
+    try:
+        from core.storage import download_file_to_local
+        import tempfile, os
+        ext = os.path.splitext(blob_name)[1] or ""
+        fd, tmp_path = tempfile.mkstemp(suffix=ext)
+        os.close(fd)
+        downloaded = download_file_to_local(blob_name, tmp_path, config=cfg)
+        return FileResponse(
+            path=str(downloaded),
+            filename=downloaded.name,
+            media_type="application/octet-stream",
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail="Blob 文件不存在")
+
+
 @download_router.get("/download")
-async def download_by_path(path: str):
+async def download_by_path(path: str, authorization: Optional[str] = Header(default=None)):
     """根据本地绝对路径或 Blob key 下载（本地测试用）"""
     cfg = load_config()
-    file_path = Path(path)
+    current_user = _resolve_current_user(authorization, cfg)
+
+    # 防止路径穿越：只允许 output_dir / temp_dir / library 目录下的文件
+    allowed_roots = [Path(cfg.output_dir).resolve(), Path(cfg.temp_dir).resolve(), Path("workspace/library").resolve()]
+    file_path = Path(path).resolve()
+    if not any(file_path.is_relative_to(root) for root in allowed_roots):
+        raise HTTPException(status_code=403, detail="不允许访问该路径")
+
     if not file_path.exists() and cfg.storage.enabled and cfg.storage.provider == "azure_blob":
         try:
             cache_path = Path(cfg.temp_dir) / "azure_blob_cache" / path
