@@ -11,7 +11,6 @@ const workflowStore = useWorkflowStore()
 const leftCollapsed = ref(false)
 const rightCollapsed = ref(false)
 
-// Dynamically compute toggle button vertical center position
 const toggleTop = ref(0)
 
 function updateToggleTop() {
