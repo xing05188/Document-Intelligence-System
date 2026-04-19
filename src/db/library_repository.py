@@ -1,4 +1,4 @@
-"""文档库数据访问层（文档空间 & 文档，基于 document_assets 表）"""
+"""文档库数据访问层（文档空间 & 文档，基于 library_documents 表）"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,7 +12,7 @@ from db.connection import db_connection, is_database_configured
 
 
 # ---------------------------------------------------------------------------
-# 数据模型（对外 API 保持原有字段名，内部映射到 document_assets）
+# 数据模型（对外 API 保持原有字段名，内部映射到 library_documents）
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -70,17 +70,16 @@ def _row_to_space(row: Dict[str, Any]) -> LibrarySpaceRow:
 
 
 def _row_to_doc(row: Dict[str, Any]) -> LibraryDocRow:
-    file_name = str(row.get("file_name", ""))
     return LibraryDocRow(
         id=str(row["id"]),
         space_id=str(row.get("space_id", "")),
         user_id=row.get("user_id"),
-        file_name=file_name,
-        file_size=int(row.get("byte_size", 0)),
+        file_name=str(row.get("file_name", "")),
+        file_size=int(row.get("file_size", 0)),
         mime_type=row.get("mime_type"),
         file_extension=row.get("file_extension"),
         storage_key=row.get("storage_key"),
-        blob_url=row.get("local_path") or row.get("storage_key"),
+        blob_url=row.get("blob_url"),
         created_at=row["created_at"],
         updated_at=row.get("updated_at") or row["created_at"],
         deleted_at=row.get("deleted_at"),
@@ -138,7 +137,7 @@ def get_library_space_by_id(
                 FROM document_spaces s
                 LEFT JOIN (
                     SELECT space_id, COUNT(*) AS doc_count
-                    FROM document_assets
+                    FROM library_documents
                     WHERE deleted_at IS NULL
                     GROUP BY space_id
                 ) d ON d.space_id = s.id
@@ -167,7 +166,7 @@ def get_library_spaces(
                     FROM document_spaces s
                     LEFT JOIN (
                         SELECT space_id, COUNT(*) AS doc_count
-                        FROM document_assets
+                        FROM library_documents
                         WHERE deleted_at IS NULL
                         GROUP BY space_id
                     ) d ON d.space_id = s.id
@@ -185,7 +184,7 @@ def get_library_spaces(
                     FROM document_spaces s
                     LEFT JOIN (
                         SELECT space_id, COUNT(*) AS doc_count
-                        FROM document_assets
+                        FROM library_documents
                         WHERE deleted_at IS NULL
                         GROUP BY space_id
                     ) d ON d.space_id = s.id
@@ -266,7 +265,7 @@ def delete_library_space(
             # 软删除空间下所有文档
             with conn.cursor() as cur:
                 cur.execute(
-                    f"UPDATE document_assets SET deleted_at = %s WHERE space_id = %s AND deleted_at IS NULL",
+                    f"UPDATE library_documents SET deleted_at = %s WHERE space_id = %s AND deleted_at IS NULL",
                     (_utc_now(), space_id),
                 )
             # 删除空间
@@ -281,7 +280,7 @@ def _get_doc_count(config: SystemConfig, space_id: str) -> int:
             cur.execute(
                 """
                 SELECT COUNT(*)::int AS doc_count
-                FROM document_assets
+                FROM library_documents
                 WHERE space_id = %s AND deleted_at IS NULL
                 """,
                 (space_id,),
@@ -313,14 +312,14 @@ def add_library_doc(
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
-                    INSERT INTO document_assets (
+                    INSERT INTO library_documents (
                         space_id, user_id, file_name, mime_type,
-                        byte_size, storage_key, local_path,
+                        file_size, storage_key, blob_url,
                         file_extension, created_at, updated_at
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id, space_id, user_id, file_name, mime_type,
-                              byte_size, storage_key, local_path,
+                              file_size, storage_key, blob_url,
                               file_extension, created_at, updated_at, deleted_at
                     """,
                     (
@@ -350,9 +349,9 @@ def get_library_docs(
             cur.execute(
                 f"""
                 SELECT id, space_id, user_id, file_name, mime_type,
-                       byte_size, storage_key, local_path,
+                       file_size, storage_key, blob_url,
                        file_extension, created_at, updated_at, deleted_at
-                FROM document_assets
+                FROM library_documents
                 WHERE {where_sql}
                 ORDER BY created_at DESC
                 """,
@@ -379,9 +378,9 @@ def get_library_doc_by_id(
             cur.execute(
                 f"""
                 SELECT id, space_id, user_id, file_name, mime_type,
-                       byte_size, storage_key, local_path,
+                       file_size, storage_key, blob_url,
                        file_extension, created_at, updated_at, deleted_at
-                FROM document_assets
+                FROM library_documents
                 WHERE {where_sql}
                 """,
                 tuple(params),
@@ -402,10 +401,10 @@ def update_library_doc(
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
-                    UPDATE document_assets SET updated_at = %s
+                    UPDATE library_documents SET updated_at = %s
                     WHERE id = %s AND deleted_at IS NULL
                     RETURNING id, space_id, user_id, file_name, mime_type,
-                              byte_size, storage_key, local_path,
+                              file_size, storage_key, blob_url,
                               file_extension, created_at, updated_at, deleted_at
                     """,
                     (_utc_now(), doc_id),
@@ -431,7 +430,7 @@ def delete_library_doc(
         with conn.transaction():
             with conn.cursor() as cur:
                 cur.execute(
-                    f"UPDATE document_assets SET deleted_at = %s WHERE {where_sql}",
+                    f"UPDATE library_documents SET deleted_at = %s WHERE {where_sql}",
                     tuple(params),
                 )
                 return cur.rowcount > 0
@@ -455,7 +454,7 @@ def get_space_doc_count(
             cur.execute(
                 f"""
                 SELECT COUNT(*)::int AS doc_count
-                FROM document_assets
+                FROM library_documents
                 WHERE {where_sql}
                 """,
                 tuple(params),
