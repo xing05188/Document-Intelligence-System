@@ -161,8 +161,8 @@ export const useLibraryStore = defineStore('library', () => {
         completed++
         uploadProgress.value = Math.round((completed / total) * 100)
       }
-      // 重新加载文档列表
-      await loadDocs(spaceId)
+      // 重新加载文档列表（强制刷新，跳过缓存）
+      await loadDocs(spaceId, true)
       // 更新空间文档数量
       const space = spaces.value.find(s => s.id === spaceId)
       if (space) {
