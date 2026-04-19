@@ -1,20 +1,36 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useWorkflowStore } from '../../stores/workflowStore'
+import { useLibraryStore } from '../../stores/libraryStore'
 
 const emit = defineEmits(['openBatchModal'])
 const workflowStore = useWorkflowStore()
+const libraryStore = useLibraryStore()
 
 const activeTab = ref('node') // 'node' | 'wf'
+const fileInputRef = ref(null)
+const isLoadingLibrary = ref(false)
+const newSpaceName = ref('')
+
+// 加载文档库空间
+onMounted(async () => {
+  try {
+    await libraryStore.loadSpaces()
+  } catch (e) {
+    console.error('loadSpaces error:', e)
+  }
+})
 
 function openBatchModal() {
   emit('openBatchModal')
 }
 
+// ==================== Tab 切换 ====================
 function switchTab(tab) {
   activeTab.value = tab
 }
 
+// ==================== 节点配置更新 ====================
 function updateConfig(key, value) {
   const nodeId = workflowStore.selectedNodeId
   if (nodeId) {
@@ -37,17 +53,201 @@ function toggleMulti(key, option, checked) {
   updateConfig(key, current)
 }
 
-// 根据 field type 渲染对应控件的当前值
+// ==================== 获取字段值 ====================
 function getFieldValue(field, node) {
   if (!node || !node.configValues) return null
   return node.configValues[field.key] ?? null
 }
 
-// 获取节点配置 Schema：优先用节点自带的 schema，否则从 nodeSchemas 按 id 查找
+// ==================== Schema 获取 ====================
 function getNodeSchema(node) {
   if (!node) return null
-  return node.schema || workflowStore.nodeSchemas[node.id] || null
+  return node.schema || workflowStore.nodeSchemas[node.schemaKey] || null
 }
+
+// ==================== 文档库选择相关 ====================
+
+// 切换输出模式
+function handleOutputModeChange(value) {
+  updateConfig('outputMode', value)
+  if (value === 'download') {
+    // 切到下载模式时，清空文档库相关配置
+    updateConfig('targetSpaceId', null)
+    updateConfig('namingRule', '')
+  }
+}
+
+async function handleCreateNewSpace() {
+  const name = newSpaceName.value.trim()
+  if (!name) return
+  try {
+    const space = await libraryStore.createSpace(name)
+    updateConfig('targetSpaceId', space.id)
+    newSpaceName.value = ''
+  } catch (e) {
+    console.error('createSpace error:', e)
+  }
+}
+
+// 切换输入来源
+function handleInputSourceChange(value) {
+  updateConfig('inputSource', value)
+}
+
+// 选择文档库空间
+function handleSpaceChange(spaceId) {
+  updateConfig('spaceId', spaceId)
+  if (spaceId) {
+    loadDocsForSpace(spaceId)
+  } else {
+    workflowStore.clearSelectedDocs()
+  }
+}
+
+async function loadDocsForSpace(spaceId) {
+  isLoadingLibrary.value = true
+  try {
+    await libraryStore.loadDocs(spaceId)
+    // 自动选中所有文档
+    const allDocIds = libraryStore.currentDocs.map(d => d.id)
+    workflowStore.setSelectedDocs([...libraryStore.currentDocs])
+  } finally {
+    isLoadingLibrary.value = false
+  }
+}
+
+// 切换文档选中
+function handleDocToggle(docId) {
+  const doc = libraryStore.currentDocs.find(d => d.id === docId)
+  if (!doc) return
+  if (workflowStore.selectedDocs.find(d => d.id === docId)) {
+    workflowStore.removeSelectedDoc(docId)
+  } else {
+    workflowStore.addSelectedDoc(doc)
+  }
+}
+
+// ==================== 本地上传 ====================
+function handleFileSelect(event) {
+  const files = Array.from(event.target.files || [])
+  if (files.length > 0) {
+    workflowStore.addLocalFiles(files)
+  }
+  // 清空 input 以便重复选择同一文件
+  if (fileInputRef.value) {
+    fileInputRef.value.value = ''
+  }
+}
+
+function handleDrop(event) {
+  event.preventDefault()
+  const files = Array.from(event.dataTransfer?.files || [])
+  const allowed = files.filter(f =>
+    ['application/pdf', 'text/markdown', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+     'text/plain'].includes(f.type) ||
+    f.name.endsWith('.md') || f.name.endsWith('.txt')
+  )
+  if (allowed.length > 0) {
+    workflowStore.addLocalFiles(allowed)
+  }
+}
+
+function handleDragOver(event) {
+  event.preventDefault()
+}
+
+// ==================== 语言/格式选择 ====================
+function handleLanguageChange(langCode) {
+  updateConfig('targetLanguage', langCode)
+}
+
+function handleFormatChange(formatCode) {
+  updateConfig('outputFormat', formatCode)
+}
+
+function _formatSize(bytes) {
+  if (!bytes) return ''
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+// ==================== 目标文档库选择 ====================
+function handleTargetSpaceChange(spaceId) {
+  if (spaceId === '__new__') {
+    // 显示新建表单，清空选择
+    updateConfig('targetSpaceId', null)
+    return
+  }
+  updateConfig('targetSpaceId', spaceId)
+}
+
+// ==================== 执行工作流 ====================
+async function handleExecute() {
+  await workflowStore.executeWorkflow()
+}
+
+// ==================== 全局设置 ====================
+function handleGlobalInputSource(value) {
+  // 全局设置也写入第一个输入节点的配置
+  const firstInputNode = workflowStore.canvasNodes.find(n => n.type === 'input')
+  if (firstInputNode) {
+    workflowStore.updateNodeConfig(firstInputNode.id, 'inputSource', value)
+  }
+}
+
+// 当前选中的文档（来自 store）
+const displayedDocs = computed(() => workflowStore.selectedDocs)
+const displayedLocalFiles = computed(() => workflowStore.localFiles)
+const currentInputSource = computed(() => {
+  const node = workflowStore.selectedNode
+  if (!node) return null
+  return getFieldValue({ key: 'inputSource' }, node) || 'library'
+})
+
+const currentSpaceId = computed(() => {
+  const node = workflowStore.selectedNode
+  if (!node) return null
+  return getFieldValue({ key: 'spaceId' }, node) || null
+})
+
+const currentOutputMode = computed(() => {
+  const node = workflowStore.selectedNode
+  if (!node) return 'download'
+  return getFieldValue({ key: 'outputMode' }, node) || 'download'
+})
+
+const currentTargetSpaceId = computed(() => {
+  const node = workflowStore.selectedNode
+  if (!node) return null
+  return getFieldValue({ key: 'targetSpaceId' }, node) || null
+})
+
+const currentLanguage = computed(() => {
+  const node = workflowStore.selectedNode
+  if (!node) return null
+  return getFieldValue({ key: 'targetLanguage' }, node) || null
+})
+
+const currentFormat = computed(() => {
+  const node = workflowStore.selectedNode
+  if (!node) return null
+  return getFieldValue({ key: 'outputFormat' }, node) || workflowStore.outputFormats[0]?.code
+})
+
+const filteredFields = computed(() => {
+  const schema = getNodeSchema(workflowStore.selectedNode)
+  if (!schema?.fields) return []
+  return schema.fields.filter(f => {
+    if (f.conditionField && f.conditionValue !== undefined) {
+      const node = workflowStore.selectedNode
+      const actualValue = getFieldValue({ key: f.conditionField }, node)
+      return actualValue === f.conditionValue
+    }
+    return true
+  })
+})
 </script>
 
 <template>
@@ -77,7 +277,7 @@ function getNodeSchema(node) {
       <!-- ======== 全局设置 ======== -->
       <div v-if="activeTab === 'wf'" class="config-section">
         <div class="node-config-header">
-          <div class="node-config-icon-wrap input-icon">🌍</div>
+          <div class="node-config-icon-wrap input-icon">⚙️</div>
           <div>
             <div class="node-config-title">{{ workflowStore.workflowName }}</div>
             <div class="node-config-subtitle">全局配置 · {{ workflowStore.canvasNodes.length }} 个节点</div>
@@ -92,28 +292,39 @@ function getNodeSchema(node) {
               <input
                 class="config-input"
                 :value="workflowStore.workflowName"
-                @input="$emit('update:workflowName', $event.target.value)"
+                @input="workflowStore.updateWorkflowName($event.target.value)"
               />
             </div>
           </div>
           <div class="field-row">
             <div class="field">
               <label class="field-label">输入文档库</label>
-              <select class="config-select" v-model="workflowStore.inputLibrary">
-                <option>论文翻译</option>
-                <option>合同审查</option>
-                <option>年报分析</option>
-                <option>数据提取</option>
-                <option>自定义...</option>
+              <select
+                class="config-select"
+                :value="libraryStore.currentSpaceId || ''"
+                @change="handleSpaceChange($event.target.value)"
+              >
+                <option value="">-- 选择文档库 --</option>
+                <option
+                  v-for="space in libraryStore.spaces"
+                  :key="space.id"
+                  :value="space.id"
+                >{{ space.icon }} {{ space.name }}</option>
               </select>
             </div>
             <div class="field">
               <label class="field-label">输出文档库</label>
-              <select class="config-select" v-model="workflowStore.outputLibrary">
-                <option>英文版论文</option>
-                <option>翻译结果</option>
-                <option>分析结果</option>
-                <option>新建文档库...</option>
+              <select
+                class="config-select"
+                :value="currentTargetSpaceId || ''"
+                @change="handleTargetSpaceChange($event.target.value)"
+              >
+                <option value="">-- 选择目标库 --</option>
+                <option
+                  v-for="space in libraryStore.spaces"
+                  :key="space.id"
+                  :value="space.id"
+                >{{ space.icon }} {{ space.name }}</option>
               </select>
             </div>
           </div>
@@ -125,16 +336,16 @@ function getNodeSchema(node) {
             <label class="field-label">并发数量</label>
             <div class="range-row">
               <input type="range" min="1" max="10" value="3" class="range-input" />
-              <span class="range-val">3</span>
+              <span class="range-val">3 个文档/批</span>
             </div>
           </div>
           <div class="field field-toggle-row">
             <label class="field-label">出错时继续</label>
-            <div class="toggle-switch on" onclick="this.classList.toggle('on')"></div>
+            <div class="toggle-switch on" @click="$event.target.classList.toggle('on')"></div>
           </div>
           <div class="field field-toggle-row">
             <label class="field-label">出错通知</label>
-            <div class="toggle-switch on" onclick="this.classList.toggle('on')"></div>
+            <div class="toggle-switch on" @click="$event.target.classList.toggle('on')"></div>
           </div>
         </div>
       </div>
@@ -175,10 +386,100 @@ function getNodeSchema(node) {
         <div class="config-group">
           <div class="config-group-label">参数配置</div>
 
-          <template v-for="field in getNodeSchema(workflowStore.selectedNode)?.fields" :key="field.key">
+          <template v-for="field in filteredFields" :key="field.key">
 
-            <!-- Select -->
-            <div v-if="field.type === 'select'" class="field">
+            <!-- ===== 输出模式选择 ===== -->
+            <div v-if="field.type === 'output-mode-select'" class="field">
+              <label class="field-label">{{ field.label }}</label>
+              <div class="source-tabs">
+                <button
+                  class="source-tab"
+                  :class="{ active: currentOutputMode === 'download' }"
+                  @click="handleOutputModeChange('download')"
+                >📥 仅输出（可下载）</button>
+                <button
+                  class="source-tab"
+                  :class="{ active: currentOutputMode === 'library' }"
+                  @click="handleOutputModeChange('library')"
+                >📚 保存到文档库</button>
+              </div>
+            </div>
+
+            <!-- ===== 输入来源选择 ===== -->
+            <div v-if="field.type === 'select-source'" class="field">
+              <label class="field-label">{{ field.label }}</label>
+              <div class="source-tabs">
+                <button
+                  v-for="opt in field.options"
+                  :key="opt.value"
+                  class="source-tab"
+                  :class="{ active: currentInputSource === opt.value }"
+                  @click="handleInputSourceChange(opt.value)"
+                >{{ opt.label }}</button>
+              </div>
+            </div>
+
+            <!-- ===== 文档库选择器 ===== -->
+            <div v-else-if="field.type === 'library-selector'" class="field">
+              <label class="field-label">{{ field.label }}</label>
+              <select
+                class="config-select"
+                :value="field.key === 'targetSpaceId' ? currentTargetSpaceId : currentSpaceId"
+                @change="field.key === 'targetSpaceId' ? handleTargetSpaceChange($event.target.value) : handleSpaceChange($event.target.value)"
+              >
+                <option value="">-- 选择文档库 --</option>
+                <option
+                  v-for="space in libraryStore.spaces"
+                  :key="space.id"
+                  :value="space.id"
+                >{{ space.icon }} {{ space.name }}</option>
+                <option value="__new__">➕ 新建文档库</option>
+              </select>
+              <div v-if="field.key === 'targetSpaceId' && currentTargetSpaceId === '__new__'" class="new-space-form">
+                <input
+                  v-model="newSpaceName"
+                  class="config-input"
+                  placeholder="输入新文档库名称"
+                  style="margin-top: 8px;"
+                />
+                <button
+                  class="btn-sm btn-primary"
+                  style="margin-top: 6px;"
+                  @click="handleCreateNewSpace"
+                >确认创建</button>
+              </div>
+            </div>
+
+            <!-- ===== 语言选择器 ===== -->
+            <div v-else-if="field.type === 'language-selector'" class="field">
+              <label class="field-label">{{ field.label }}</label>
+              <div class="language-grid">
+                <button
+                  v-for="lang in workflowStore.availableLanguages"
+                  :key="lang.code"
+                  class="lang-chip"
+                  :class="{ active: currentLanguage === lang.code }"
+                  @click="handleLanguageChange(lang.code)"
+                >{{ lang.label }}</button>
+              </div>
+            </div>
+
+            <!-- ===== 格式选择器 ===== -->
+            <div v-else-if="field.type === 'format-selector'" class="field">
+              <label class="field-label">{{ field.label }}</label>
+              <div class="format-grid">
+                <button
+                  v-for="fmt in workflowStore.outputFormats"
+                  :key="fmt.code"
+                  class="format-chip"
+                  :class="{ active: currentFormat === fmt.code }"
+                  @click="handleFormatChange(fmt.code)"
+                >{{ fmt.label }}</button>
+              </div>
+            </div>
+
+            <!-- ===== Select ===== -->
+            <div v-else-if="field.type === 'select'" class="field">
               <label class="field-label">{{ field.label }}</label>
               <select
                 class="config-select"
@@ -189,7 +490,7 @@ function getNodeSchema(node) {
               </select>
             </div>
 
-            <!-- Input -->
+            <!-- ===== Input ===== -->
             <div v-else-if="field.type === 'input'" class="field">
               <label class="field-label">{{ field.label }}</label>
               <input
@@ -200,7 +501,7 @@ function getNodeSchema(node) {
               />
             </div>
 
-            <!-- Textarea -->
+            <!-- ===== Textarea ===== -->
             <div v-else-if="field.type === 'textarea'" class="field">
               <label class="field-label">{{ field.label }}</label>
               <textarea
@@ -210,7 +511,7 @@ function getNodeSchema(node) {
               ></textarea>
             </div>
 
-            <!-- Range -->
+            <!-- ===== Range ===== -->
             <div v-else-if="field.type === 'range'" class="field">
               <label class="field-label">{{ field.label }}</label>
               <div class="range-row">
@@ -220,13 +521,13 @@ function getNodeSchema(node) {
                   :min="field.min"
                   :max="field.max"
                   :value="getFieldValue(field, workflowStore.selectedNode)"
-                  @input="updateConfig(field.key, Number($event.target.value)); $nextTick(() => $event.target.nextElementSibling.textContent = $event.target.value + ' ' + field.unit)"
+                  @input="updateConfig(field.key, Number($event.target.value))"
                 />
-                <span class="range-val">{{ getFieldValue(field, workflowStore.selectedNode) }} {{ field.unit }}</span>
+                <span class="range-val">{{ getFieldValue(field, workflowStore.selectedNode) || field.min }} {{ field.unit }}</span>
               </div>
             </div>
 
-            <!-- Toggle -->
+            <!-- ===== Toggle ===== -->
             <div v-else-if="field.type === 'toggle'" class="field field-toggle-row">
               <label class="field-label">{{ field.label }}</label>
               <div
@@ -236,7 +537,7 @@ function getNodeSchema(node) {
               ></div>
             </div>
 
-            <!-- Multi-select tags -->
+            <!-- ===== Multi-select tags ===== -->
             <div v-else-if="field.type === 'multiselect'" class="field">
               <label class="field-label">{{ field.label }}</label>
               <div class="tag-grid">
@@ -253,29 +554,151 @@ function getNodeSchema(node) {
           </template>
         </div>
 
-        <!-- Selected Docs Summary -->
-        <div class="config-group">
+        <!-- ===== 文档选择区域（仅输入节点显示） ===== -->
+        <div v-if="workflowStore.selectedNode.type === 'input'" class="config-group">
           <div class="config-group-label">
-            待处理文档 <span id="docCount">({{ workflowStore.selectedDocs.length }})</span>
+            待处理文档
+            <span class="doc-count-badge">
+              {{ displayedDocs.length + displayedLocalFiles.length }} 个
+            </span>
+          </div>
+
+          <!-- 来源标签 -->
+          <div class="source-tabs" style="margin-bottom: 12px;">
+            <button
+              class="source-tab"
+              :class="{ active: currentInputSource === 'library' }"
+              @click="handleInputSourceChange('library')"
+            >📚 从文档库</button>
+            <button
+              class="source-tab"
+              :class="{ active: currentInputSource === 'local' }"
+              @click="handleInputSourceChange('local')"
+            >📁 本地上传</button>
+          </div>
+
+          <!-- 文档库文档列表 -->
+          <div v-if="currentInputSource === 'library'" class="doc-library-section">
+            <div v-if="isLoadingLibrary" class="doc-loading">
+              <span class="loading-dots-sm"><span></span><span></span><span></span></span> 加载文档...
+            </div>
+            <div v-else-if="!currentSpaceId" class="doc-empty-hint">
+              请先在「参数配置」中选择一个文档库
+            </div>
+            <div v-else-if="libraryStore.currentDocs.length === 0" class="doc-empty-hint">
+              该文档库暂无文档
+            </div>
+            <div v-else class="doc-list">
+              <div
+                v-for="doc in libraryStore.currentDocs"
+                :key="doc.id"
+                class="doc-list-item"
+                :class="{ selected: workflowStore.selectedDocs.find(d => d.id === doc.id) }"
+                @click="handleDocToggle(doc.id)"
+              >
+                <div class="doc-list-check">
+                  <span v-if="workflowStore.selectedDocs.find(d => d.id === doc.id)">✓</span>
+                </div>
+                <span class="doc-list-icon">📄</span>
+                <span class="doc-list-name">{{ doc.name }}</span>
+                <span class="doc-list-size">{{ doc.size }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 本地上传区域 -->
+          <div v-else class="doc-local-section">
+            <div
+              class="upload-zone"
+              @click="fileInputRef?.click()"
+              @drop="handleDrop"
+              @dragover="handleDragOver"
+            >
+              <input
+                ref="fileInputRef"
+                type="file"
+                accept=".pdf,.md,.docx,.doc,.xlsx,.txt"
+                multiple
+                style="display:none"
+                @change="handleFileSelect"
+              />
+              <div class="upload-zone-icon">📁</div>
+              <div class="upload-zone-text">点击或拖拽文件到此处</div>
+              <div class="upload-zone-hint">支持 PDF、Markdown、Word、Excel、TXT</div>
+            </div>
+
+            <!-- 已选本地文件 -->
+            <div v-if="displayedLocalFiles.length > 0" class="local-files-list">
+              <div
+                v-for="file in displayedLocalFiles"
+                :key="file.id"
+                class="local-file-item"
+              >
+                <span class="local-file-icon">📄</span>
+                <span class="local-file-name">{{ file.name }}</span>
+                <span class="local-file-size">{{ _formatSize(file.size) }}</span>
+                <button
+                  class="local-file-remove"
+                  @click="workflowStore.removeLocalFile(file.id)"
+                >×</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Selected Docs Summary (for non-input nodes) -->
+        <div v-if="workflowStore.selectedNode.type !== 'input' && (displayedDocs.length > 0 || displayedLocalFiles.length > 0)" class="config-group">
+          <div class="config-group-label">
+            已选文档 <span class="doc-count-badge">{{ displayedDocs.length + displayedLocalFiles.length }} 个</span>
           </div>
           <div class="selected-docs-list">
             <div
-              v-for="doc in workflowStore.selectedDocs"
+              v-for="doc in displayedDocs"
               :key="doc.id"
               class="selected-doc-item"
             >
-              <span class="selected-doc-icon">📕</span>
+              <span class="selected-doc-icon">📄</span>
               <span class="selected-doc-name">{{ doc.name }}</span>
               <span class="selected-doc-size">{{ doc.size }}</span>
+            </div>
+            <div
+              v-for="file in displayedLocalFiles"
+              :key="file.id"
+              class="selected-doc-item"
+            >
+              <span class="selected-doc-icon">📁</span>
+              <span class="selected-doc-name">{{ file.name }}</span>
+              <span class="selected-doc-size">{{ _formatSize(file.size) }}</span>
             </div>
           </div>
         </div>
 
         <!-- Action Button -->
-        <button class="config-btn" @click="openBatchModal">
-          <span>▶</span>
-          <span>开始批量处理</span>
+        <button
+          class="config-btn"
+          :class="{ executing: workflowStore.isExecuting }"
+          @click="handleExecute"
+          :disabled="workflowStore.isExecuting"
+        >
+          <span v-if="workflowStore.isExecuting" class="btn-spinner"></span>
+          <span v-else>▶</span>
+          <span>{{ workflowStore.isExecuting ? `翻译中 ${workflowStore.executionProgress}%` : '开始翻译' }}</span>
         </button>
+
+        <!-- Execution Progress -->
+        <div v-if="workflowStore.isExecuting || workflowStore.executionLogs.length > 0" class="execution-status">
+          <div class="exec-progress-bar">
+            <div class="exec-progress-fill" :style="{ width: workflowStore.executionProgress + '%' }"></div>
+          </div>
+          <div class="exec-logs">
+            <div
+              v-for="(log, i) in workflowStore.executionLogs"
+              :key="i"
+              class="exec-log-item"
+              :class="'log-' + log.type"
+            >{{ log.message }}</div>
+          </div>
+        </div>
       </div>
 
       <!-- ======== 无选中节点 — 空状态 ======== -->
@@ -283,13 +706,14 @@ function getNodeSchema(node) {
         <div class="empty-icon">⬡</div>
         <div class="empty-title">点击节点以配置</div>
         <div class="empty-desc">在画布上点击任意节点<br/>右侧将切换显示该节点的专属配置</div>
-        <div class="empty-nodes-hint">
+        <div class="empty-nodes-hint" v-if="workflowStore.canvasNodes.length > 0">
           <div class="empty-nodes-title">工作流节点</div>
           <div
             v-for="(node, i) in workflowStore.canvasNodes"
             :key="node.id"
             class="empty-node-item"
             :class="{ done: workflowStore.selectedNodeId && i < workflowStore.canvasNodes.findIndex(n => n.id === workflowStore.selectedNodeId) }"
+            @click="workflowStore.selectNode(node.id)"
           >
             <span class="empty-node-icon">{{ node.icon }}</span>
             <span>{{ node.title }}</span>
@@ -300,3 +724,436 @@ function getNodeSchema(node) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.source-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  padding: 3px;
+}
+
+.source-tab {
+  flex: 1;
+  padding: 8px 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.source-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.source-tab.active {
+  background: var(--bg-card);
+  border-color: rgba(168, 85, 247, 0.3);
+  color: var(--accent-purple);
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(168, 85, 247, 0.15);
+}
+
+.doc-count-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-primary);
+  background: rgba(99, 102, 241, 0.15);
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-left: 8px;
+}
+
+.doc-library-section {
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.doc-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.loading-dots-sm {
+  display: flex;
+  gap: 4px;
+}
+
+.loading-dots-sm span {
+  width: 6px;
+  height: 6px;
+  background: var(--accent-purple);
+  border-radius: 50%;
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+.loading-dots-sm span:nth-child(2) { animation-delay: 0.2s; }
+.loading-dots-sm span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes pulse-dot {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
+}
+
+.doc-empty-hint {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.doc-list {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.doc-list-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.doc-list-item:last-child {
+  border-bottom: none;
+}
+
+.doc-list-item:hover {
+  background: var(--bg-hover);
+}
+
+.doc-list-item.selected {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.doc-list-check {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border-color);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--accent-primary);
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+
+.doc-list-item.selected .doc-list-check {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: white;
+}
+
+.doc-list-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.doc-list-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-primary);
+}
+
+.doc-list-size {
+  color: var(--text-muted);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* Local upload section */
+.doc-local-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.upload-zone {
+  border: 2px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 24px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: var(--bg-tertiary);
+}
+
+.upload-zone:hover {
+  border-color: var(--accent-purple);
+  background: rgba(168, 85, 247, 0.05);
+}
+
+.upload-zone-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+.upload-zone-text {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.upload-zone-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.local-files-list {
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.local-file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.local-file-item:last-child {
+  border-bottom: none;
+}
+
+.local-file-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.local-file-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-primary);
+}
+
+.local-file-size {
+  color: var(--text-muted);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.local-file-remove {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  font-size: 16px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.local-file-remove:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--accent-danger);
+}
+
+/* Language grid */
+.language-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.lang-chip {
+  padding: 6px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.lang-chip:hover {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.lang-chip.active {
+  background: rgba(6, 182, 212, 0.15);
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+  font-weight: 600;
+}
+
+/* Format grid */
+.format-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.format-chip {
+  padding: 6px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.format-chip:hover {
+  border-color: var(--accent-warning);
+  color: var(--accent-warning);
+}
+
+.format-chip.active {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: var(--accent-warning);
+  color: var(--accent-warning);
+  font-weight: 600;
+}
+
+.field-hint {
+  margin-top: 6px;
+}
+
+.hint-loading {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Execute button */
+.config-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px;
+  background: var(--gradient-success);
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 15px;
+  font-weight: 600;
+  color: white;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-top: 8px;
+}
+
+.config-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
+}
+
+.config-btn.executing {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+.config-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.btn-spinner {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Execution status */
+.execution-status {
+  margin-top: 16px;
+  padding: 14px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+}
+
+.exec-progress-bar {
+  height: 6px;
+  background: var(--bg-secondary);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.exec-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-success), var(--accent-cyan));
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+.exec-logs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.exec-log-item {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.exec-log-item:last-child {
+  border-bottom: none;
+}
+
+.exec-log-item.log-done {
+  color: var(--accent-success);
+}
+
+.exec-log-item.log-error {
+  color: var(--accent-danger);
+}
+</style>

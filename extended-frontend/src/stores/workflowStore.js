@@ -1,220 +1,101 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import workflowApi from '../api/workflow'
 
 export const useWorkflowStore = defineStore('workflow', () => {
-  const currentWorkflowId = ref('wf1')
+  // ==================== 状态 ====================
+
+  const currentWorkflowId = ref(null)
   const searchQuery = ref('')
-  const workflowName = ref('论文翻译工作流')
-  const inputLibrary = ref('论文翻译')
-  const outputLibrary = ref('英文版论文')
-  const targetLanguage = ref('英文')
+  const workflowName = ref('新建工作流')
+
+  // 选中的文档（来自文档库或本地上传）
+  const selectedDocs = ref([])
+  const localFiles = ref([])       // 本地上传的文件（File 对象）
 
   // 当前选中的节点 ID
   const selectedNodeId = ref(null)
 
-  // 每个节点的配置值（key: nodeId, value: { paramKey: paramValue })
+  // 每个节点的配置值（key: nodeId, value: { paramKey: paramValue }）
   const nodeConfigs = ref({})
 
-  const workflows = ref({
-    'wf1': {
-      id: 'wf1',
-      name: '论文翻译工作流',
-      icon: '🌍',
-      time: '刚刚编辑',
-      type: 'custom'
-    },
-    'wf2': {
-      id: 'wf2',
-      name: '合同审查工作流',
-      icon: '⚖️',
-      time: '昨天',
-      type: 'custom'
-    },
-    'wf3': {
-      id: 'wf3',
-      name: '数据提取工作流',
-      icon: '📊',
-      time: '3天前',
-      type: 'custom'
-    },
-    'tpl1': {
-      id: 'tpl1',
-      name: '文档分析模板',
-      icon: '📄',
-      time: '系统预设',
-      type: 'template'
-    },
-    'tpl2': {
-      id: 'tpl2',
-      name: '批量摘要模板',
-      icon: '📝',
-      time: '系统预设',
-      type: 'template'
-    }
-  })
-
-  const selectedDocs = ref([
-    { id: 1, name: '深度学习综述.pdf', size: '2.4MB' },
-    { id: 2, name: '注意力机制研究.pdf', size: '1.8MB' },
-    { id: 3, name: 'Transformer架构.pdf', size: '3.2MB' },
-    { id: 4, name: 'GAN生成对抗网络.pdf', size: '2.1MB' }
-  ])
-
-  const toolboxItems = ref([
-    { section: '输入', items: [
-      { icon: '📕', name: 'PDF 输入', type: 'input', title: 'PDF 输入', body: '导入 PDF 文件', schema: {
-        icon: '📕', iconClass: 'input', subtitle: '输入节点',
-        fields: [
-          { key: 'inputLibrary', label: '输入文档库', type: 'select', options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
-          { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' },
-          { key: 'skipExisting', label: '跳过已处理文档', type: 'toggle' }
-        ]
-      }},
-      { icon: '📝', name: 'MD 输入', type: 'input', title: 'MD 输入', body: '导入 Markdown 文件', schema: {
-        icon: '📝', iconClass: 'input', subtitle: '输入节点',
-        fields: [
-          { key: 'inputLibrary', label: '输入文档库', type: 'select', options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
-          { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' }
-        ]
-      }},
-      { icon: '📊', name: 'XLSX 输入', type: 'input', title: 'XLSX 输入', body: '导入 Excel 表格数据', schema: {
-        icon: '📊', iconClass: 'input', subtitle: '输入节点',
-        fields: [
-          { key: 'inputLibrary', label: '输入文档库', type: 'select', options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
-          { key: 'sheetIndex', label: '工作表索引', type: 'input' },
-          { key: 'hasHeader', label: '首行为表头', type: 'toggle' }
-        ]
-      }},
-      { icon: '📘', name: 'DOCX 输入', type: 'input', title: 'DOCX 输入', body: '导入 Word 文档', schema: {
-        icon: '📘', iconClass: 'input', subtitle: '输入节点',
-        fields: [
-          { key: 'inputLibrary', label: '输入文档库', type: 'select', options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
-          { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' }
-        ]
-      }}
-    ]},
-    { section: '处理', items: [
-      { icon: '📖', name: '文档解析', type: 'parse', title: '文档解析', body: '提取文本、表格、图表结构化数据', schema: {
-        icon: '📖', iconClass: 'parse', subtitle: '处理节点',
-        fields: [
-          { key: 'parseMode', label: '解析模式', type: 'select', options: ['快速解析（仅文本）', '标准解析（文本+结构）', '深度解析（全量）'] },
-          { key: 'extractTables', label: '提取表格', type: 'toggle' },
-          { key: 'extractImages', label: '提取图片描述', type: 'toggle' },
-          { key: 'extractCharts', label: '提取图表数据', type: 'toggle' }
-        ]
-      }},
-      { icon: '🎯', name: '实体提取', type: 'parse', title: '实体提取', body: '使用 LLM 提取关键实体和关系', schema: {
-        icon: '🎯', iconClass: 'parse', subtitle: '处理节点',
-        fields: [
-          { key: 'model', label: '提取模型', type: 'select', options: ['GPT-4o (推荐)', 'GPT-4o-mini', 'Claude 3.5 Sonnet', 'DeepSeek V3'] },
-          { key: 'entityTypes', label: '实体类型', type: 'multiselect', options: ['人物', '组织', '地点', '时间', '金额', '事件', '术语'] },
-          { key: 'relationTypes', label: '关系类型', type: 'input' }
-        ]
-      }},
-      { icon: '✂️', name: '数据处理', type: 'parse', title: '数据处理', body: '清洗、转换、聚合数据', schema: {
-        icon: '✂️', iconClass: 'parse', subtitle: '处理节点',
-        fields: [
-          { key: 'processMode', label: '处理模式', type: 'select', options: ['清洗', '转换', '聚合', '过滤', '排序'] },
-          { key: 'processFields', label: '处理字段', type: 'input' }
-        ]
-      }},
-      { icon: '🤖', name: 'AI 翻译', type: 'ai', title: 'AI 翻译', body: '使用大模型进行智能翻译处理', schema: {
-        icon: '🤖', iconClass: 'ai', subtitle: 'AI 节点',
-        fields: [
-          { key: 'model', label: 'AI 模型', type: 'select', options: ['GPT-4o (推荐)', 'GPT-4o-mini', 'Claude 3.5 Sonnet', 'DeepSeek V3'] },
-          { key: 'prompt', label: '处理提示词', type: 'textarea' }
-        ]
-      }}
-    ]},
-    { section: '输出', items: [
-      { icon: '💾', name: '保存文件', type: 'output', title: '保存文件', body: '保存处理结果到本地文件', schema: {
-        icon: '💾', iconClass: 'output', subtitle: '输出节点',
-        fields: [
-          { key: 'savePath', label: '保存路径', type: 'input' },
-          { key: 'fileFormat', label: '文件格式', type: 'select', options: ['PDF', 'Word (.docx)', 'Excel (.xlsx)', 'Markdown', 'TXT'] }
-        ]
-      }},
-      { icon: '📁', name: '输出到文档库', type: 'output', title: '输出到文档库', body: '保存结果到指定文档库空间', schema: {
-        icon: '📁', iconClass: 'output', subtitle: '输出节点',
-        fields: [
-          { key: 'outputLibrary', label: '输出文档库', type: 'select', options: ['英文版论文', '翻译结果', '分析结果', '新建文档库...'] },
-          { key: 'namingRule', label: '文件命名规则', type: 'input' },
-          { key: 'metaTag', label: '自动打标签', type: 'input' },
-          { key: 'notifyOnComplete', label: '完成通知', type: 'toggle' }
-        ]
-      }}
-    ]}
-  ])
-
+  // 画布节点列表
   const canvasNodes = ref([])
 
-  // 节点配置 Schema（定义每个节点的参数结构）
-  const nodeSchemas = {
-    'schema-pdf': {
+  // ==================== 动态数据（从 API 加载） ====================
+
+  const workflows = ref({})
+  const templates = ref([])
+  const availableModels = ref([])
+  const availableLanguages = ref([
+    { code: 'en', label: '英语' },
+    { code: 'zh', label: '中文' },
+    { code: 'ja', label: '日语' },
+    { code: 'ko', label: '韩语' },
+    { code: 'fr', label: '法语' },
+    { code: 'de', label: '德语' },
+    { code: 'es', label: '西班牙语' },
+    { code: 'ru', label: '俄语' },
+    { code: 'ar', label: '阿拉伯语' },
+    { code: 'pt', label: '葡萄牙语' },
+    { code: 'it', label: '意大利语' },
+  ])
+  const outputFormats = ref([
+    { code: 'pdf', label: 'PDF' },
+    { code: 'docx', label: 'Word (.docx)' },
+    { code: 'xlsx', label: 'Excel (.xlsx)' },
+    { code: 'md', label: 'Markdown' },
+    { code: 'txt', label: 'TXT' },
+  ])
+
+  // ==================== 节点 Schema（无硬编码值，所有选项由 API 决定） ====================
+
+  const nodeSchemas = ref({
+    'schema-pdf-input': {
       icon: '📕', iconClass: 'input',
       title: 'PDF 输入', subtitle: '输入节点',
       fields: [
-        { key: 'inputLibrary', label: '输入文档库', type: 'select',
-          options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
-        { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' },
+        { key: 'inputSource', label: '文档来源', type: 'select-source',
+          options: [{ value: 'library', label: '从文档库选择' }, { value: 'local', label: '本地上传' }] },
+        { key: 'spaceId', label: '选择文档库', type: 'library-selector' },
         { key: 'skipExisting', label: '跳过已处理文档', type: 'toggle' }
       ]
     },
-    'schema-md': {
+    'schema-md-input': {
       icon: '📝', iconClass: 'input',
       title: 'MD 输入', subtitle: '输入节点',
       fields: [
-        { key: 'inputLibrary', label: '输入文档库', type: 'select',
-          options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
-        { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' }
+        { key: 'inputSource', label: '文档来源', type: 'select-source',
+          options: [{ value: 'library', label: '从文档库选择' }, { value: 'local', label: '本地上传' }] },
+        { key: 'spaceId', label: '选择文档库', type: 'library-selector' }
       ]
     },
-    'schema-xlsx': {
+    'schema-docx-input': {
+      icon: '📘', iconClass: 'input',
+      title: 'DOCX 输入', subtitle: '输入节点',
+      fields: [
+        { key: 'inputSource', label: '文档来源', type: 'select-source',
+          options: [{ value: 'library', label: '从文档库选择' }, { value: 'local', label: '本地上传' }] },
+        { key: 'spaceId', label: '选择文档库', type: 'library-selector' }
+      ]
+    },
+    'schema-xlsx-input': {
       icon: '📊', iconClass: 'input',
       title: 'XLSX 输入', subtitle: '输入节点',
       fields: [
-        { key: 'inputLibrary', label: '输入文档库', type: 'select',
-          options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
+        { key: 'inputSource', label: '文档来源', type: 'select-source',
+          options: [{ value: 'library', label: '从文档库选择' }, { value: 'local', label: '本地上传' }] },
+        { key: 'spaceId', label: '选择文档库', type: 'library-selector' },
         { key: 'sheetIndex', label: '工作表索引', type: 'input' },
         { key: 'hasHeader', label: '首行为表头', type: 'toggle' }
       ]
     },
-    'schema-docx': {
-      icon: '📘', iconClass: 'input',
-      title: 'DOCX 输入', subtitle: '输入节点',
+    'schema-translate': {
+      icon: '🌍', iconClass: 'ai',
+      title: 'AI 翻译', subtitle: '翻译节点',
       fields: [
-        { key: 'inputLibrary', label: '输入文档库', type: 'select',
-          options: ['论文翻译', '合同审查', '年报分析', '数据提取', '自定义...'] },
-        { key: 'batchSize', label: '批处理大小', type: 'range', min: 1, max: 50, unit: '个文档/批' }
-      ]
-    },
-    'schema-extract': {
-      icon: '🎯', iconClass: 'parse',
-      title: '实体提取', subtitle: '处理节点',
-      fields: [
-        { key: 'model', label: '提取模型', type: 'select',
-          options: ['GPT-4o (推荐)', 'GPT-4o-mini', 'Claude 3.5 Sonnet', 'DeepSeek V3'] },
-        { key: 'entityTypes', label: '实体类型', type: 'multiselect',
-          options: ['人物', '组织', '地点', '时间', '金额', '事件', '术语'] },
-        { key: 'relationTypes', label: '关系类型', type: 'input' }
-      ]
-    },
-    'schema-process': {
-      icon: '✂️', iconClass: 'parse',
-      title: '数据处理', subtitle: '处理节点',
-      fields: [
-        { key: 'processMode', label: '处理模式', type: 'select',
-          options: ['清洗', '转换', '聚合', '过滤', '排序'] },
-        { key: 'processFields', label: '处理字段', type: 'input' }
-      ]
-    },
-    'schema-ai': {
-      icon: '🤖', iconClass: 'ai',
-      title: 'AI 翻译', subtitle: 'AI 节点',
-      fields: [
-        { key: 'model', label: 'AI 模型', type: 'select',
-          options: ['GPT-4o (推荐)', 'GPT-4o-mini', 'Claude 3.5 Sonnet', 'DeepSeek V3'] },
-        { key: 'prompt', label: '处理提示词', type: 'textarea' }
+        { key: 'targetLanguage', label: '目标语言', type: 'language-selector' },
+        { key: 'prompt', label: '翻译提示词', type: 'textarea' }
       ]
     },
     'schema-save': {
@@ -222,13 +103,88 @@ export const useWorkflowStore = defineStore('workflow', () => {
       title: '保存文件', subtitle: '输出节点',
       fields: [
         { key: 'savePath', label: '保存路径', type: 'input' },
-        { key: 'fileFormat', label: '文件格式', type: 'select',
-          options: ['PDF', 'Word (.docx)', 'Excel (.xlsx)', 'Markdown', 'TXT'] }
+        { key: 'outputFormat', label: '输出格式', type: 'format-selector' }
+      ]
+    },
+    'schema-library-output': {
+      icon: '📁', iconClass: 'output',
+      title: '输出文件', subtitle: '输出节点',
+      fields: [
+        { key: 'outputMode', label: '输出模式', type: 'output-mode-select' },
+        { key: 'targetSpaceId', label: '目标文档库', type: 'library-selector', conditionField: 'outputMode', conditionValue: 'library' },
+        { key: 'namingRule', label: '文件命名规则', type: 'input', conditionField: 'outputMode', conditionValue: 'library' },
+        { key: 'outputFormat', label: '输出格式', type: 'format-selector' },
+        { key: 'notifyOnComplete', label: '完成通知', type: 'toggle' }
       ]
     }
-  }
+  })
 
-  const currentWorkflow = computed(() => workflows.value[currentWorkflowId.value])
+  // ==================== 工具箱（无硬编码值） ====================
+
+  const toolboxItems = ref([
+    {
+      section: '输入',
+      items: [
+        {
+          icon: '📕', name: 'PDF 输入', type: 'input', title: 'PDF 输入', body: '导入 PDF 文件',
+          schemaKey: 'schema-pdf-input',
+          schema: null // 动态从 nodeSchemas 获取
+        },
+        {
+          icon: '📝', name: 'MD 输入', type: 'input', title: 'MD 输入', body: '导入 Markdown 文件',
+          schemaKey: 'schema-md-input',
+          schema: null
+        },
+        {
+          icon: '📘', name: 'DOCX 输入', type: 'input', title: 'DOCX 输入', body: '导入 Word 文档',
+          schemaKey: 'schema-docx-input',
+          schema: null
+        },
+        {
+          icon: '📊', name: 'XLSX 输入', type: 'input', title: 'XLSX 输入', body: '导入 Excel 表格数据',
+          schemaKey: 'schema-xlsx-input',
+          schema: null
+        }
+      ]
+    },
+    {
+      section: '处理',
+      items: [
+        {
+          icon: '🌍', name: 'AI 翻译', type: 'ai', title: 'AI 翻译', body: '使用大模型进行智能翻译处理',
+          schemaKey: 'schema-translate',
+          schema: null
+        }
+      ]
+    },
+    {
+      section: '输出',
+      items: [
+        {
+          icon: '💾', name: '保存文件', type: 'output', title: '保存文件', body: '保存处理结果到本地文件',
+          schemaKey: 'schema-save',
+          schema: null
+        },
+        {
+          icon: '📁', name: '输出文件', type: 'output', title: '输出文件', body: '保存结果到文档库或直接下载',
+          schemaKey: 'schema-library-output',
+          schema: null
+        }
+      ]
+    }
+  ])
+
+  // ==================== 执行状态 ====================
+
+  const isExecuting = ref(false)
+  const executionProgress = ref(0)
+  const executionLogs = ref([])
+
+  // ==================== 计算属性 ====================
+
+  const currentWorkflow = computed(() =>
+    currentWorkflowId.value ? workflows.value[currentWorkflowId.value] : null
+  )
 
   const customWorkflows = computed(() =>
     Object.values(workflows.value).filter(w => w.type === 'custom')
@@ -238,22 +194,98 @@ export const useWorkflowStore = defineStore('workflow', () => {
     Object.values(workflows.value).filter(w => w.type === 'template')
   )
 
+  const selectedNode = computed(() =>
+    canvasNodes.value.find(n => n.id === selectedNodeId.value)
+  )
+
+  // 文档总数（库选 + 本地）
+  const totalDocCount = computed(() =>
+    selectedDocs.value.length + localFiles.value.length
+  )
+
+  // ==================== API 加载 ====================
+
+  async function loadWorkflows() {
+    try {
+      const res = await workflowApi.getWorkflows()
+      const list = res?.workflows || []
+      workflows.value = {}
+      list.forEach(w => {
+        workflows.value[w.id] = {
+          id: w.id,
+          name: w.name,
+          icon: w.icon || '🔧',
+          time: _formatTime(w.updated_at || w.created_at),
+          type: w.type || 'custom',
+          nodes: w.nodes || [],
+          config: w.config || {}
+        }
+      })
+    } catch (e) {
+      console.error('loadWorkflows error:', e)
+    }
+  }
+
+  async function loadTemplates() {
+    try {
+      const res = await workflowApi.getTemplates()
+      const list = res?.templates || []
+      templates.value = list.map(t => ({
+        id: t.id,
+        name: t.name,
+        icon: t.icon || '📄',
+        description: t.description || '',
+        type: 'template',
+        time: '系统预设',
+        nodes: t.nodes || [],
+        config: t.config || {}
+      }))
+      // 合并到 workflows
+      templates.value.forEach(t => {
+        workflows.value[t.id] = t
+      })
+    } catch (e) {
+      console.error('loadTemplates error:', e)
+    }
+  }
+
+  async function loadModels() {
+    try {
+      const res = await workflowApi.getModels()
+      availableModels.value = res?.models || []
+    } catch (e) {
+      console.error('loadModels error:', e)
+    }
+  }
+
+  // ==================== 工作流操作 ====================
+
   function selectWorkflow(workflowId) {
     currentWorkflowId.value = workflowId
     const wf = workflows.value[workflowId]
     if (wf) {
       workflowName.value = wf.name
+      // 加载节点到画布
+      canvasNodes.value = (wf.nodes || []).map((n, i) => ({
+        ...n,
+        x: 30 + i * 260,
+        y: 160,
+        configValues: n.configValues || {}
+      }))
+      selectedNodeId.value = null
     }
   }
 
   function createNewWorkflow() {
-    const id = 'wf' + Date.now()
+    const id = 'wf_' + Date.now()
     workflows.value[id] = {
       id,
       name: '新建工作流',
       icon: '🔧',
       time: '刚刚',
-      type: 'custom'
+      type: 'custom',
+      nodes: [],
+      config: {}
     }
     currentWorkflowId.value = id
     workflowName.value = '新建工作流'
@@ -261,17 +293,45 @@ export const useWorkflowStore = defineStore('workflow', () => {
     selectedNodeId.value = null
   }
 
-  function setSearchQuery(query) {
-    searchQuery.value = query
-  }
-
-  function updateWorkflowName(name) {
-    workflowName.value = name
+  async function saveCurrentWorkflow() {
+    if (!currentWorkflowId.value) return
     const wf = workflows.value[currentWorkflowId.value]
-    if (wf) {
-      wf.name = name
+    if (!wf) return
+    wf.name = workflowName.value
+    wf.nodes = canvasNodes.value.map(({ x, y, ...rest }) => rest)
+    try {
+      await workflowApi.saveWorkflow({
+        id: wf.id,
+        name: wf.name,
+        type: wf.type,
+        nodes: wf.nodes,
+        config: wf.config
+      })
+      wf.time = '刚刚'
+    } catch (e) {
+      console.error('saveCurrentWorkflow error:', e)
     }
   }
+
+  async function deleteWorkflow(workflowId) {
+    try {
+      await workflowApi.deleteWorkflow(workflowId)
+    } catch (e) {
+      console.error('deleteWorkflow error:', e)
+    }
+    delete workflows.value[workflowId]
+    if (currentWorkflowId.value === workflowId) {
+      const keys = Object.keys(workflows.value)
+      currentWorkflowId.value = keys.length > 0 ? keys[0] : null
+      if (currentWorkflowId.value) {
+        selectWorkflow(currentWorkflowId.value)
+      } else {
+        createNewWorkflow()
+      }
+    }
+  }
+
+  // ==================== 节点操作 ====================
 
   function selectNode(nodeId) {
     selectedNodeId.value = nodeId
@@ -290,24 +350,36 @@ export const useWorkflowStore = defineStore('workflow', () => {
     if (node) {
       if (!node.configValues) node.configValues = {}
       node.configValues[key] = value
+
+      // 特殊处理：inputSource 变化时清空对应数据
+      if (key === 'inputSource') {
+        if (value === 'library') {
+          node.configValues.localFiles = []
+        } else {
+          node.configValues.spaceId = null
+          selectedDocs.value = []
+        }
+      }
     }
   }
 
-  function addNode(type, icon, title, body, schema) {
-    const id = 'n' + Date.now()
+  function addNode(toolboxItem) {
+    const schema = nodeSchemas.value[toolboxItem.schemaKey] || null
+    const id = 'n_' + Date.now()
     const lastNode = canvasNodes.value[canvasNodes.value.length - 1]
     const x = lastNode ? lastNode.x + 260 : 30
     const y = lastNode ? lastNode.y : 160
     const newNode = {
       id,
-      type,
-      icon,
-      title,
-      body,
+      type: toolboxItem.type,
+      icon: toolboxItem.icon,
+      title: toolboxItem.title,
+      body: toolboxItem.body,
       x,
       y,
       configValues: {},
-      schema: schema || null
+      schemaKey: toolboxItem.schemaKey,
+      schema
     }
     canvasNodes.value.push(newNode)
     selectedNodeId.value = id
@@ -325,36 +397,286 @@ export const useWorkflowStore = defineStore('workflow', () => {
     }
   }
 
-  const selectedNode = computed(() =>
-    canvasNodes.value.find(n => n.id === selectedNodeId.value)
-  )
+  function clearCanvas() {
+    canvasNodes.value = []
+    selectedNodeId.value = null
+  }
+
+  // ==================== 文档操作（从文档库） ====================
+
+  function setSelectedDocs(docs) {
+    selectedDocs.value = docs
+  }
+
+  function addSelectedDoc(doc) {
+    if (!selectedDocs.value.find(d => d.id === doc.id)) {
+      selectedDocs.value.push(doc)
+    }
+  }
+
+  function removeSelectedDoc(docId) {
+    selectedDocs.value = selectedDocs.value.filter(d => d.id !== docId)
+  }
+
+  function clearSelectedDocs() {
+    selectedDocs.value = []
+  }
+
+  // ==================== 本地文件操作 ====================
+
+  function addLocalFiles(files) {
+    files.forEach(file => {
+      if (!localFiles.value.find(f => f.name === file.name && f.size === file.size)) {
+        localFiles.value.push({
+          id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+          name: file.name,
+          size: file.size,
+          file: file,
+          type: file.type
+        })
+      }
+    })
+  }
+
+  function removeLocalFile(fileId) {
+    localFiles.value = localFiles.value.filter(f => f.id !== fileId)
+  }
+
+  function clearLocalFiles() {
+    localFiles.value = []
+  }
+
+  // ==================== 工作流执行 ====================
+
+  async function executeWorkflow() {
+    if (isExecuting.value) return
+    isExecuting.value = true
+    executionProgress.value = 0
+    executionLogs.value = []
+
+    try {
+      // 收集执行参数
+      const params = {
+        workflowId: currentWorkflowId.value,
+        nodes: canvasNodes.value.map(n => ({
+          id: n.id,
+          type: n.type,
+          title: n.title,
+          configValues: n.configValues
+        })),
+        docs: selectedDocs.value.map(d => d.id),
+        localFiles: localFiles.value.map(f => ({ name: f.name, size: f.size }))
+      }
+
+      const res = await workflowApi.execute(params)
+      const executionId = res?.execution_id
+
+      // 轮询执行状态
+      await pollExecution(executionId)
+    } catch (e) {
+      executionLogs.value.push({ type: 'error', message: e.message })
+    } finally {
+      isExecuting.value = false
+    }
+  }
+
+  async function pollExecution(executionId) {
+    const maxPolls = 60
+    let polls = 0
+    while (polls < maxPolls) {
+      try {
+        const res = await workflowApi.getExecutionStatus(executionId)
+        const status = res?.status
+        if (status === 'completed') {
+          executionProgress.value = 100
+          executionLogs.value.push({ type: 'done', message: '翻译完成' })
+          break
+        } else if (status === 'failed') {
+          executionLogs.value.push({ type: 'error', message: res?.error || '执行失败' })
+          break
+        } else {
+          executionProgress.value = res?.progress || executionProgress.value
+          if (res?.logs) {
+            res.logs.forEach(log => executionLogs.value.push(log))
+          }
+        }
+      } catch (e) {
+        executionLogs.value.push({ type: 'error', message: e.message })
+        break
+      }
+      await new Promise(r => setTimeout(r, 2000))
+      polls++
+    }
+    if (polls >= maxPolls) {
+      executionLogs.value.push({ type: 'error', message: '执行超时' })
+    }
+  }
+
+  // ==================== 辅助方法 ====================
+
+  function setSearchQuery(query) {
+    searchQuery.value = query
+  }
+
+  function updateWorkflowName(name) {
+    workflowName.value = name
+    const wf = workflows.value[currentWorkflowId.value]
+    if (wf) {
+      wf.name = name
+    }
+  }
+
+  // 根据 schemaKey 获取 schema（用于配置面板动态渲染）
+  function getSchemaByKey(schemaKey) {
+    return nodeSchemas.value[schemaKey] || null
+  }
+
+  // 加载翻译模板（预置文档翻译专用模板）
+  function loadTranslationTemplate() {
+    const templateId = 'tpl_translation'
+    workflows.value[templateId] = {
+      id: templateId,
+      name: '文档翻译流',
+      icon: '🌍',
+      time: '系统预设',
+      type: 'template',
+      nodes: [
+        {
+          id: 'n_pdf',
+          type: 'input',
+          icon: '📕',
+          title: 'PDF 输入',
+          body: '导入 PDF 文件',
+          configValues: {
+            inputSource: 'library',
+            spaceId: null,
+            skipExisting: false
+          },
+          schemaKey: 'schema-pdf-input',
+          schema: nodeSchemas.value['schema-pdf-input']
+        },
+        {
+          id: 'n_translate',
+          type: 'ai',
+          icon: '🌍',
+          title: 'AI 翻译',
+          body: '使用大模型进行智能翻译处理',
+          configValues: {
+            targetLanguage: 'en',
+            prompt: '请将此文档翻译为指定语言，保持原文格式和专业术语的准确性。'
+          },
+          schemaKey: 'schema-translate',
+          schema: nodeSchemas.value['schema-translate']
+        },
+        {
+          id: 'n_output',
+          type: 'output',
+          icon: '📁',
+          title: '输出文件',
+          body: '保存结果到文档库或直接下载',
+          configValues: {
+            outputMode: 'download',
+            targetSpaceId: null,
+            namingRule: '{original_name}_translated',
+            outputFormat: 'pdf',
+            notifyOnComplete: true
+          },
+          schemaKey: 'schema-library-output',
+          schema: nodeSchemas.value['schema-library-output']
+        }
+      ],
+      config: {}
+    }
+    currentWorkflowId.value = templateId
+    workflowName.value = '文档翻译流'
+    canvasNodes.value = [
+      {
+        ...workflows.value[templateId].nodes[0], x: 30, y: 160
+      },
+      {
+        ...workflows.value[templateId].nodes[1], x: 290, y: 160
+      },
+      {
+        ...workflows.value[templateId].nodes[2], x: 550, y: 160
+      }
+    ]
+    selectedNodeId.value = null
+  }
+
+  function _formatTime(dateStr) {
+    if (!dateStr) return ''
+    const date = new Date(dateStr)
+    const now = new Date()
+    const diff = now - date
+    const minutes = Math.floor(diff / 60000)
+    const hours = Math.floor(diff / 3600000)
+    const days = Math.floor(diff / 86400000)
+    if (minutes < 1) return '刚刚'
+    if (minutes < 60) return `${minutes}分钟前`
+    if (hours < 24) return `${hours}小时前`
+    if (days === 1) return '昨天'
+    if (days < 7) return `${days}天前`
+    return date.toLocaleDateString('zh-CN')
+  }
+
+  // ==================== 导出 ====================
 
   return {
+    // 状态
     currentWorkflowId,
     searchQuery,
     workflowName,
-    inputLibrary,
-    outputLibrary,
-    targetLanguage,
+    selectedDocs,
+    localFiles,
     selectedNodeId,
     selectedNode,
     nodeConfigs,
     nodeSchemas,
     workflows,
-    selectedDocs,
+    templates,
     toolboxItems,
     canvasNodes,
+    availableModels,
+    availableLanguages,
+    outputFormats,
+    isExecuting,
+    executionProgress,
+    executionLogs,
+    // 计算属性
     currentWorkflow,
     customWorkflows,
     templateWorkflows,
+    totalDocCount,
+    // API 加载
+    loadWorkflows,
+    loadTemplates,
+    loadModels,
+    // 工作流操作
     selectWorkflow,
     createNewWorkflow,
+    saveCurrentWorkflow,
+    deleteWorkflow,
     setSearchQuery,
     updateWorkflowName,
+    loadTranslationTemplate,
+    // 节点操作
     selectNode,
     updateNodePosition,
     updateNodeConfig,
     addNode,
-    deleteNode
+    deleteNode,
+    clearCanvas,
+    getSchemaByKey,
+    // 文档操作
+    setSelectedDocs,
+    addSelectedDoc,
+    removeSelectedDoc,
+    clearSelectedDocs,
+    // 本地文件
+    addLocalFiles,
+    removeLocalFile,
+    clearLocalFiles,
+    // 执行
+    executeWorkflow
   }
 })

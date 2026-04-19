@@ -169,7 +169,7 @@ const selectedIndex = computed(() => {
           <div class="node-selected-badge">当前选中</div>
           <div class="node-port input-port"></div>
           <div class="node-header">
-            <div class="node-icon" :class="'type-' + node.type">{{ node.icon }}</div>
+            <div class="node-icon" :class="node.type + '-icon'">{{ node.icon }}</div>
             <span class="node-title">{{ node.title }}</span>
             <span class="node-step-tag">Step {{ i + 1 }}</span>
             <button
