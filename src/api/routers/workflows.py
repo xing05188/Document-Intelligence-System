@@ -18,7 +18,9 @@ Workflow API 路由
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,10 +32,10 @@ from core.orchestrator.coordinator import WorkflowCoordinator
 from core.orchestrator.task_spec import FileInfo, FileType, TaskSpec, TaskType
 from core.storage import build_blob_name, upload_file_to_storage
 from db.auth_repository import resolve_user_from_authorization
+from db.workflow_repository import db_load_execution_states, db_save_execution_states, is_db_enabled
 from db.session_repository import add_session_file, get_session_by_id
 from utils.logger import get_logger
 from workflow_storage import delete_workflow, get_workflow, list_workflows, save_workflow
-from .workflows_processors import _process_node
 
 router = APIRouter(prefix="/api/workflows", tags=["工作流编排"])
 logger = get_logger(__name__)
@@ -42,6 +44,55 @@ logger = get_logger(__name__)
 # key: execution_id, value: state dict
 _EXECUTION_STATES: Dict[str, dict] = {}
 
+
+def _execution_states_file(config: Optional[SystemConfig] = None) -> Path:
+    cfg = config or get_config()
+    state_dir = Path(cfg.work_dir) / "workflows"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return state_dir / "execution_states.json"
+
+
+def _load_execution_states(config: Optional[SystemConfig] = None) -> Dict[str, dict]:
+    cfg = config or get_config()
+    if is_db_enabled(cfg):
+        loaded = db_load_execution_states(cfg)
+        if loaded:
+            return loaded
+
+    path = _execution_states_file(config)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception as exc:
+        logger.warning(f"加载工作流执行状态失败: {exc}")
+    return {}
+
+
+def _persist_execution_states(config: Optional[SystemConfig] = None) -> None:
+    cfg = config or get_config()
+    if is_db_enabled(cfg):
+        if db_save_execution_states(_EXECUTION_STATES, cfg):
+            return
+
+    path = _execution_states_file(config)
+    tmp_path = path.with_suffix(".tmp")
+    try:
+        tmp_path.write_text(
+            json.dumps(_EXECUTION_STATES, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
+    except Exception as exc:
+        logger.warning(f"持久化工作流执行状态失败: {exc}")
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+_EXECUTION_STATES.update(_load_execution_states())
+
 # ==================== Request / Response 模型 ====================
 
 
@@ -49,6 +100,7 @@ class WorkflowNode(BaseModel):
     id: str
     type: str
     title: str
+    schemaKey: Optional[str] = None
     configValues: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -72,6 +124,7 @@ class ExecutionResponse(BaseModel):
     logs: List[Dict[str, str]] = Field(default_factory=list)
     output_files: List[Dict[str, Any]] = Field(default_factory=list)
     error: Optional[str] = None
+    error_code: Optional[str] = None
 
 
 class TemplateResponse(BaseModel):
@@ -88,6 +141,14 @@ def _get_output_config(nodes: List[WorkflowNode]) -> Dict[str, Any]:
     """从节点列表中提取输出节点配置。"""
     for node in nodes:
         if node.type == "output":
+            return node.configValues or {}
+    return {}
+
+
+def _get_input_config(nodes: List[WorkflowNode]) -> Dict[str, Any]:
+    """从节点列表中提取输入节点配置。"""
+    for node in nodes:
+        if node.type == "input":
             return node.configValues or {}
     return {}
 
@@ -190,6 +251,8 @@ def _make_progress_callback(execution_id: str):
         state = _EXECUTION_STATES[execution_id]
         state["progress"] = max(state["progress"], int(progress / max(total, 1) * 100))
         state["logs"].append({"type": "info", "message": message})
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _persist_execution_states()
 
     return callback
 
@@ -210,6 +273,7 @@ async def _run_execution(execution_id: str, params: ExecuteRequest):
         output_format = output_config.get("outputFormat", "md")
         target_space_id = output_config.get("targetSpaceId")
         naming_rule = output_config.get("namingRule", "{original_name}_out")
+        input_config = _get_input_config(params.nodes)
 
         translation_config = _get_translation_config(params.nodes)
         target_language = _normalize_lang(translation_config.get("targetLanguage", "中文"))
@@ -271,7 +335,10 @@ async def _run_execution(execution_id: str, params: ExecuteRequest):
         if not source_files:
             state["status"] = "failed"
             state["error"] = "没有可处理的文件"
+            state["error_code"] = "VALIDATION_ERROR"
             state["logs"].append({"type": "error", "message": "没有可处理的文件"})
+            state["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _persist_execution_states(config)
             return
 
         state["total_files"] = len(source_files)
@@ -279,7 +346,9 @@ async def _run_execution(execution_id: str, params: ExecuteRequest):
 
         # ===== 逐文件处理 =====
         all_output_files: List[Dict[str, Any]] = []
-        ext = output_format or "md"
+        failed_count = 0
+        failure_messages: List[str] = []
+        coordinator = WorkflowCoordinator(config)
 
         for idx, file_info in enumerate(source_files):
             state["current_file_index"] = idx + 1
@@ -288,130 +357,85 @@ async def _run_execution(execution_id: str, params: ExecuteRequest):
             state["logs"].append(
                 {"type": "info", "message": f"[{idx + 1}/{len(source_files)}] 正在处理: {file_info.name}"}
             )
+            state["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _persist_execution_states(config)
 
             if not file_info.path or not Path(file_info.path).exists():
                 state["logs"].append({"type": "warn", "message": f"  跳过（文件不存在）: {file_info.name}"})
                 continue
 
-            # 构建输出路径
-            out_name = naming_rule.replace("{original_name}", Path(file_info.path).stem)
-            if not out_name.endswith(f".{ext}"):
-                out_name += f".{ext}"
-            out_path = Path(config.output_dir) / out_name
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # 读取源文件内容
-            state["logs"].append({"type": "info", "message": f"  读取文件..."})
-            try:
-                from utils.document_reader import read_document
-                content = read_document(file_info.path)
-            except Exception as e:
-                logger.warning(f"文档解析失败 {file_info.path}: {e}")
-                content = None
-
-            if not content:
-                state["logs"].append({"type": "warn", "message": f"  无法读取文件内容，跳过: {file_info.name}"})
+            task_spec = TaskSpec(
+                task_type=TaskType.WORKFLOW_PIPELINE,
+                instruction=f"workflow:{params.workflowId}",
+                source_files=[file_info],
+                session_id=params.sessionId,
+                parameters={
+                    "workflow_nodes": [n.model_dump() for n in params.nodes],
+                    "output_config": {
+                        "outputMode": output_mode,
+                        "outputFormat": output_format,
+                        "targetSpaceId": target_space_id,
+                        "namingRule": naming_rule,
+                        "targetLanguage": target_language,
+                        "savePath": output_config.get("savePath"),
+                        "notifyOnComplete": output_config.get("notifyOnComplete"),
+                    },
+                    "input_config": input_config,
+                    "execution_id": execution_id,
+                },
+            )
+            wf_result = coordinator.execute(task_spec, progress_callback=_make_progress_callback(execution_id))
+            if not wf_result.success:
+                failed_count += 1
+                failure_messages.append(str(wf_result.message))
+                state["logs"].append({"type": "error", "message": f"  执行失败: {wf_result.message}"})
                 continue
 
-            # ===== 处理流水线（支持多个处理节点） =====
-            processing_nodes = _get_processing_nodes(params.nodes)
-            result_content = content
-            
-            for proc_node in processing_nodes:
-                node_name = proc_node.title or proc_node.type
-                state["logs"].append({"type": "info", "message": f"  {node_name} 处理中..."})
-                try:
-                    result_content = _process_node(result_content, file_info.name, proc_node, config, state)
-                except Exception as e:
-                    logger.error(f"处理失败 {file_info.name} ({node_name}): {e}")
-                    state["logs"].append({"type": "error", "message": f"  {node_name} 失败: {e}"})
-                    result_content = None
-                    break
-                
-                if not result_content:
-                    state["logs"].append({"type": "error", "message": f"  {node_name} 结果为空，跳过: {file_info.name}"})
-                    break
-            
-            if not result_content:
-                state["logs"].append({"type": "error", "message": f"  处理流水线完成但无有效结果，跳过: {file_info.name}"})
+            out_item = {}
+            if isinstance(wf_result.data, dict):
+                out_item = wf_result.data.get("output", {}) or {}
+            if not out_item:
+                state["logs"].append({"type": "warn", "message": f"  无输出产物: {file_info.name}"})
                 continue
-            
-            translated = result_content
 
-            # 保存输出文件
-            try:
-                # 推导正确的文件后缀和 MIME 类型
-                fmt_ext = output_format  # md | txt | pdf
-                if fmt_ext not in ("md", "txt", "pdf"):
-                    fmt_ext = "md"
-                ext = f".{fmt_ext}"
-                mime_map = {"pdf": "application/pdf", "md": "text/markdown; charset=utf-8", "txt": "text/plain; charset=utf-8"}
-                mime_type = mime_map.get(fmt_ext, "text/plain; charset=utf-8")
+            all_output_files.append(out_item)
+            out_path = out_item.get("path")
+            out_name = out_item.get("name", file_info.name)
+            state["logs"].append({"type": "done", "message": f"  已保存: {out_name}"})
+            state["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _persist_execution_states(config)
 
-                # 文件名（按 naming_rule，但保持对应后缀）
-                out_name = naming_rule.replace("{original_name}", Path(file_info.path).stem)
-                if not out_name.endswith(ext):
-                    out_name = out_name + ext
-                out_path = Path(config.output_dir) / out_name
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-
-                # 生成文件内容
-                if fmt_ext == "pdf":
-                    from utils.pdf_generator import text_to_pdf
-                    state["logs"].append({"type": "info", "message": f"  生成 PDF..."})
-                    text_to_pdf(translated, str(out_path), title=out_name)
-                else:
-                    out_path.write_text(translated, encoding="utf-8")
-
-                file_size = out_path.stat().st_size
-
-                # 上传到 Blob Storage（无论哪种输出模式都上传）
-                blob_name = None
-                if config.storage.enabled and config.storage.provider == "azure_blob":
-                    from core.storage import upload_file_to_storage, build_blob_name
-                    try:
-                        blob_name = upload_file_to_storage(
-                            out_path,
-                            config=config,
-                            blob_name=build_blob_name(
-                                execution_id,
-                                out_path.name,
-                                prefix=config.storage.azure_blob_prefix or "workflows",
-                            ),
-                            content_type=mime_type,
-                        )
-                        logger.info(f"已上传到 Blob: {blob_name}")
-                    except Exception as blob_err:
-                        logger.warning(f"Blob 上传失败: {blob_err}")
-
-                all_output_files.append({
-                    "name": out_path.name,
-                    "path": str(out_path),
-                    "blob_name": blob_name,
-                    "size": file_size,
-                    "source": file_info.name,
-                })
-                state["logs"].append({"type": "done", "message": f"  已保存: {out_path.name} ({fmt_ext.upper()})"})
-
-                # 保存到文档库
-                if output_mode == "library" and target_space_id:
-                    _save_output_to_library(str(out_path), target_space_id, config)
-                    state["logs"].append({"type": "done", "message": f"  已保存到文档库: {out_path.name}"})
-            except Exception as e:
-                logger.error(f"保存文件失败 {out_path}: {e}")
-                state["logs"].append({"type": "error", "message": f"  保存失败: {e}"})
+            if output_mode == "library" and target_space_id and out_path:
+                _save_output_to_library(str(out_path), target_space_id, config)
+                state["logs"].append({"type": "done", "message": f"  已保存到文档库: {out_name}"})
 
         # ===== 完成 =====
-        state["status"] = "completed"
         state["progress"] = 100
         state["output_files"] = all_output_files
-        state["logs"].append({"type": "done", "message": f"全部完成，已处理 {len(all_output_files)} 个输出文件"})
+        if all_output_files:
+            state["status"] = "completed"
+            state["error"] = None
+            state["error_code"] = None
+            state["logs"].append({"type": "done", "message": f"全部完成，已处理 {len(all_output_files)} 个输出文件"})
+            if failed_count > 0:
+                state["logs"].append({"type": "warn", "message": f"其中 {failed_count} 个文件处理失败"})
+        else:
+            state["status"] = "failed"
+            state["error_code"] = "WORKFLOW_FAILED"
+            merged = "；".join(failure_messages[-3:]) if failure_messages else "全部文件处理失败"
+            state["error"] = merged
+            state["logs"].append({"type": "error", "message": f"执行失败: {merged}"})
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _persist_execution_states(config)
 
     except Exception as e:
         logger.error(f"执行任务异常: {e}")
         state["status"] = "failed"
         state["error"] = str(e)
+        state["error_code"] = "INTERNAL_ERROR"
         state["logs"].append({"type": "error", "message": f"执行异常: {e}"})
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _persist_execution_states(config)
 
 
 def _save_output_to_library(file_path: str, space_id: str, config: SystemConfig):
@@ -480,7 +504,11 @@ async def execute_workflow(request: ExecuteRequest, background_tasks: Background
         "logs": [{"type": "info", "message": "任务已启动，正在初始化..."}],
         "output_files": [],
         "error": None,
+        "error_code": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    _persist_execution_states()
 
     # 后台运行，不阻塞 HTTP 响应
     background_tasks.add_task(_run_execution, execution_id, request)
@@ -583,7 +611,7 @@ async def list_templates():
                         "outputMode": "download",
                         "targetSpaceId": None,
                         "namingRule": "{original_name}_translated",
-                        "outputFormat": "docx",
+                        "outputFormat": "md",
                         "notifyOnComplete": True,
                     }
                 },
@@ -595,7 +623,8 @@ async def list_templates():
 @router.get("/templates/{template_id}", response_model=TemplateResponse)
 async def get_template(template_id: str):
     """获取指定模板的完整配置。"""
-    templates = await list_templates()
+    templates_resp = await list_templates()
+    templates = templates_resp.get("templates", []) if isinstance(templates_resp, dict) else []
     for t in templates:
         if t["id"] == template_id:
             return t
@@ -608,6 +637,13 @@ async def get_execution_status(execution_id: str):
     state = _EXECUTION_STATES.get(execution_id)
     if not state:
         raise HTTPException(status_code=404, detail="执行记录不存在")
+    error_code = state.get("error_code")
+    if not error_code and state.get("status") == "failed":
+        error_text = str(state.get("error") or "")
+        if "没有可处理的文件" in error_text or "缺少" in error_text:
+            error_code = "VALIDATION_ERROR"
+        else:
+            error_code = "WORKFLOW_FAILED"
     return ExecutionResponse(
         execution_id=execution_id,
         status=state["status"],
@@ -618,6 +654,7 @@ async def get_execution_status(execution_id: str):
         logs=state["logs"],
         output_files=state["output_files"],
         error=state["error"],
+        error_code=error_code,
     )
 
 

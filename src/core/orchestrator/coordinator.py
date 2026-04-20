@@ -59,6 +59,7 @@ class WorkflowCoordinator:
             TaskType.DOCUMENT_EDITING: self._document_editing_flow,
             TaskType.ENTITY_EXTRACTION: self._entity_extraction_flow,
             TaskType.TABLE_FILLING: self._table_filling_flow,
+            TaskType.WORKFLOW_PIPELINE: self._workflow_pipeline_flow,
         }
 
     def execute(self, task_spec: TaskSpec, progress_callback=None) -> WorkflowResult:
@@ -231,24 +232,83 @@ class WorkflowCoordinator:
             extracted_data.message = "实体提取完成，已生成可下载文件"
 
         # 3. 填入模板
+        filled_template = ""
         if task_spec.template_file:
             filled_template = self.executor.fill_template(
                 data=extracted_data,
                 template=task_spec.template_file
             )
+            if filled_template:
+                extracted_data.metadata = extracted_data.metadata or {}
+                generated = extracted_data.metadata.get("generated_file_paths")
+                if not isinstance(generated, list):
+                    generated = []
+                if filled_template not in generated:
+                    generated.append(filled_template)
+                extracted_data.metadata["generated_file_paths"] = generated
 
-            return WorkflowResult(
-                success=True,
-                message="实体提取完成",
-                data=extracted_data,
-                output_file=saved_json_path or saved_xlsx_path or task_spec.output_file
+        # 4. 可选入库（仅在显式开启 store_to_db 且数据库启用时执行）
+        db_message = ""
+        should_store_to_db = bool(task_spec.parameters.get("store_to_db")) and bool(self.config.database.enabled)
+        if should_store_to_db:
+            payload_fields = payload.get("schema", {}).get("fields", []) if isinstance(payload, dict) else []
+            payload_entities = payload.get("entities", []) if isinstance(payload, dict) else []
+            if not isinstance(payload_fields, list):
+                payload_fields = []
+            if not payload_fields and isinstance(payload_entities, list) and payload_entities and isinstance(payload_entities[0], dict):
+                payload_fields = list(payload_entities[0].keys())
+            db_payload = {
+                "fields": payload_fields,
+                "entities": payload_entities if isinstance(payload_entities, list) else [],
+                "schema_version": "1.0.0",
+            }
+            if task_spec.parameters.get("task_id"):
+                db_payload["task_id"] = str(task_spec.parameters.get("task_id"))
+
+            db_task_spec = TaskSpec(
+                task_type=task_spec.task_type,
+                instruction=task_spec.instruction,
+                source_files=task_spec.source_files,
+                template_file=task_spec.template_file,
+                output_file=task_spec.output_file,
+                parameters={"data": db_payload},
+                conversation_history=task_spec.conversation_history,
+                session_id=task_spec.session_id,
             )
+            db_result = self.executor.execute_agent(agent_name="agent_c", task_spec=db_task_spec)
+            if getattr(db_result, "success", False):
+                db_message = "，并已写入数据库"
+                db_data = getattr(db_result, "data", {})
+                db_info = {
+                    "success": True,
+                    "task_uuid": db_data.get("task_uuid") if isinstance(db_data, dict) else None,
+                    "extraction_id": db_data.get("extraction_id") if isinstance(db_data, dict) else None,
+                    "result_version": db_data.get("result_version") if isinstance(db_data, dict) else None,
+                }
+                extracted_data.metadata = extracted_data.metadata or {}
+                extracted_data.metadata["db_result"] = db_info
+                if isinstance(getattr(extracted_data, "data", None), dict):
+                    extracted_data.data["db_result"] = db_info
+            else:
+                self.logger.warning(f"实体提取入库失败: {getattr(db_result, 'message', '')}")
+                db_message = "（数据库写入失败，已保留本地输出）"
+                db_meta = getattr(db_result, "metadata", None)
+                db_error_code = db_meta.get("error_code") if isinstance(db_meta, dict) else None
+                fail_info = {
+                    "success": False,
+                    "error_code": db_error_code,
+                    "message": getattr(db_result, "message", "数据库写入失败"),
+                }
+                extracted_data.metadata = extracted_data.metadata or {}
+                extracted_data.metadata["db_result"] = fail_info
+                if isinstance(getattr(extracted_data, "data", None), dict):
+                    extracted_data.data["db_result"] = fail_info
 
         return WorkflowResult(
             success=True,
-            message="实体提取完成",
+            message=f"实体提取完成{db_message}",
             data=extracted_data,
-            output_file=saved_json_path or saved_xlsx_path or task_spec.output_file,
+            output_file=filled_template or saved_json_path or saved_xlsx_path or task_spec.output_file,
         )
 
     def _save_entities_xlsx(self, payload: Dict[str, Any], filename: str) -> str:
@@ -319,6 +379,23 @@ class WorkflowCoordinator:
             message="表格填表完成",
             data=result,
             output_file=task_spec.output_file
+        )
+
+    def _workflow_pipeline_flow(self, task_spec: TaskSpec, progress_callback=None) -> WorkflowResult:
+        """
+        工作流编排模式（统一入口）：
+        由 executor 执行节点流水线，coordinator 负责统一结果封装。
+        """
+        self.logger.info("进入工作流编排模式")
+        result = self.executor.execute_workflow_pipeline(task_spec, progress_callback=progress_callback)
+        if not isinstance(result, dict) or not result.get("success"):
+            message = result.get("message", "工作流执行失败") if isinstance(result, dict) else "工作流执行失败"
+            return WorkflowResult(success=False, message=message, data=result)
+        return WorkflowResult(
+            success=True,
+            message=result.get("message", "工作流执行完成"),
+            data=result,
+            output_file=result.get("output_file"),
         )
 
     def _persist_generated_file(self, task_spec: TaskSpec, result: WorkflowResult) -> None:
@@ -399,4 +476,5 @@ class WorkflowCoordinator:
             TaskType.DOCUMENT_EDITING.value: "文档编辑模式 - 按要求编辑Word文档",
             TaskType.ENTITY_EXTRACTION.value: "实体提取模式 - 从文档中提取数据填入模板",
             TaskType.TABLE_FILLING.value: "表格填表模式 - 从Excel筛选数据填入表格",
+            TaskType.WORKFLOW_PIPELINE.value: "工作流编排模式 - 按节点顺序处理文档",
         }

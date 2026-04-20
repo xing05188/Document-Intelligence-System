@@ -27,24 +27,16 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const workflows = ref({})
   const templates = ref([])
   const availableModels = ref([])
-  const availableLanguages = ref([
-    { code: 'en', label: '英语' },
-    { code: 'zh', label: '中文' },
-    { code: 'ja', label: '日语' },
-    { code: 'ko', label: '韩语' },
-    { code: 'fr', label: '法语' },
-    { code: 'de', label: '德语' },
-    { code: 'es', label: '西班牙语' },
-    { code: 'ru', label: '俄语' },
-    { code: 'ar', label: '阿拉伯语' },
-    { code: 'pt', label: '葡萄牙语' },
-    { code: 'it', label: '意大利语' },
-  ])
-  const outputFormats = ref([
-    { code: 'pdf', label: 'PDF' },
-    { code: 'md', label: 'Markdown' },
-    { code: 'txt', label: 'TXT' },
-  ])
+  const availableLanguages = ref([])
+  const outputFormats = ref([])
+  const unsupportedFieldHints = ref({
+    sheetIndex: '暂不支持（当前按默认工作表读取）',
+    hasHeader: '暂不支持（当前自动识别表头）',
+    notifyOnComplete: '暂不支持（当前默认在执行日志中提示）',
+    concurrentLimit: '暂不支持（当前后端固定串行处理）',
+    continueOnError: '暂不支持（当前默认继续执行）',
+    notifyOnError: '暂不支持（当前仅日志提示）',
+  })
 
   // ==================== 节点 Schema（无硬编码值，所有选项由 API 决定） ====================
 
@@ -171,6 +163,53 @@ export const useWorkflowStore = defineStore('workflow', () => {
         { key: 'prompt', label: '自定义分割规则', type: 'textarea' }
       ]
     },
+    'schema-keyword-highlight': {
+      icon: '🖍️', iconClass: 'ai',
+      title: '关键词高亮', subtitle: '增强节点',
+      fields: [
+        { key: 'topK', label: '关键词数量', type: 'input', placeholder: '默认 10' },
+        { key: 'marker', label: '高亮标记符', type: 'input', placeholder: '默认 **' },
+        { key: 'prompt', label: '自定义规则', type: 'textarea' }
+      ]
+    },
+    'schema-sensitive-masking': {
+      icon: '🔒', iconClass: 'ai',
+      title: '敏感信息脱敏', subtitle: '安全节点',
+      fields: [
+        { key: 'maskToken', label: '掩码符号', type: 'input', placeholder: '默认 *' },
+        { key: 'prompt', label: '自定义脱敏规则', type: 'textarea' }
+      ]
+    },
+    'schema-term-normalize': {
+      icon: '📚', iconClass: 'ai',
+      title: '术语统一替换', subtitle: '规范节点',
+      fields: [
+        { key: 'termDictionary', label: '术语词典', type: 'textarea', placeholder: '示例：A=>标准术语A; B=>标准术语B' },
+        { key: 'prompt', label: '自定义规则', type: 'textarea' }
+      ]
+    },
+    'schema-outline-generate': {
+      icon: '🧭', iconClass: 'ai',
+      title: '结构化提纲生成', subtitle: '分析节点',
+      fields: [
+        { key: 'maxDepth', label: '最大层级', type: 'input', placeholder: '默认 3' },
+        { key: 'prompt', label: '自定义规则', type: 'textarea' }
+      ]
+    },
+    'schema-sentiment-enhanced': {
+      icon: '📈', iconClass: 'ai',
+      title: '情感倾向分析', subtitle: '分析节点',
+      fields: [
+        { key: 'prompt', label: '自定义分析规则', type: 'textarea' }
+      ]
+    },
+    'schema-timeline-extract': {
+      icon: '🕒', iconClass: 'ai',
+      title: '时间线抽取', subtitle: '抽取节点',
+      fields: [
+        { key: 'prompt', label: '自定义抽取规则', type: 'textarea' }
+      ]
+    },
     'schema-save': {
       icon: '💾', iconClass: 'output',
       title: '保存文件', subtitle: '输出节点',
@@ -261,6 +300,36 @@ export const useWorkflowStore = defineStore('workflow', () => {
         {
           icon: '✂️', name: '文档分割', type: 'ai', title: '文档分割', body: '智能分割文档为多个部分',
           schemaKey: 'schema-split-document',
+          schema: null
+        },
+        {
+          icon: '🖍️', name: '关键词高亮', type: 'ai', title: '关键词高亮', body: '提取关键词并在结果中标注高亮',
+          schemaKey: 'schema-keyword-highlight',
+          schema: null
+        },
+        {
+          icon: '🔒', name: '敏感信息脱敏', type: 'ai', title: '敏感信息脱敏', body: '手机号/身份证/邮箱等自动掩码',
+          schemaKey: 'schema-sensitive-masking',
+          schema: null
+        },
+        {
+          icon: '📚', name: '术语统一替换', type: 'ai', title: '术语统一替换', body: '按词典规范化术语表达',
+          schemaKey: 'schema-term-normalize',
+          schema: null
+        },
+        {
+          icon: '🧭', name: '结构化提纲生成', type: 'ai', title: '结构化提纲生成', body: '按层级输出目录提纲',
+          schemaKey: 'schema-outline-generate',
+          schema: null
+        },
+        {
+          icon: '📈', name: '情感倾向分析', type: 'ai', title: '情感倾向分析', body: '输出打分、标签和依据',
+          schemaKey: 'schema-sentiment-enhanced',
+          schema: null
+        },
+        {
+          icon: '🕒', name: '时间线抽取', type: 'ai', title: '时间线抽取', body: '提取事件并按时间排序',
+          schemaKey: 'schema-timeline-extract',
           schema: null
         }
       ]
@@ -363,9 +432,33 @@ export const useWorkflowStore = defineStore('workflow', () => {
   async function loadModels() {
     try {
       const res = await workflowApi.getModels()
-      availableModels.value = res?.models || []
+      availableModels.value = Array.isArray(res) ? res : (res?.models || [])
     } catch (e) {
       console.error('loadModels error:', e)
+    }
+  }
+
+  async function loadLanguages() {
+    try {
+      const res = await workflowApi.getLanguages()
+      availableLanguages.value = (Array.isArray(res) ? res : []).map(item => ({
+        code: item.code,
+        label: item.name || item.code
+      }))
+    } catch (e) {
+      console.error('loadLanguages error:', e)
+    }
+  }
+
+  async function loadOutputFormats() {
+    try {
+      const res = await workflowApi.getOutputFormats()
+      outputFormats.value = (Array.isArray(res) ? res : []).map(item => ({
+        code: item.code,
+        label: item.name || item.code
+      }))
+    } catch (e) {
+      console.error('loadOutputFormats error:', e)
     }
   }
 
@@ -662,6 +755,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
           id: n.id,
           type: n.type,
           title: n.title,
+          schemaKey: n.schemaKey,
           configValues: _sanitizeNodeConfigValues(n.configValues)
         })),
         docs: selectedDocs.value.map(d => d.id),
@@ -850,6 +944,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     availableModels,
     availableLanguages,
     outputFormats,
+    unsupportedFieldHints,
     isExecuting,
     executionProgress,
     executionLogs,
@@ -863,6 +958,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     loadWorkflows,
     loadTemplates,
     loadModels,
+    loadLanguages,
+    loadOutputFormats,
     // 工作流操作
     selectWorkflow,
     createNewWorkflow,
