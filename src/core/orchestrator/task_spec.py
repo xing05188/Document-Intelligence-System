@@ -15,6 +15,7 @@ class TaskType(Enum):
     DOCUMENT_EDITING = "document_editing"  # 文档编辑模式
     ENTITY_EXTRACTION = "entity_extraction"  # 实体提取模式
     TABLE_FILLING = "table_filling"  # 表格填表模式
+    WORKFLOW_PIPELINE = "workflow_pipeline"  # 工作流节点编排模式
 
 
 class FileType(Enum):
@@ -108,6 +109,9 @@ class TaskSpec:
         elif self.task_type == TaskType.TABLE_FILLING:
             if not self.has_table():
                 return False, "表格填表模式需要提供 Excel 文件 (xlsx/xls)"
+        elif self.task_type == TaskType.WORKFLOW_PIPELINE:
+            if not self.source_files:
+                return False, "工作流编排模式需要提供至少一个源文件"
 
         return True, ""
 

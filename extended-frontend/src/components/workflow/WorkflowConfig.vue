@@ -16,9 +16,14 @@ const isSaving = ref(false)
 // 加载文档库空间
 onMounted(async () => {
   try {
-    await libraryStore.loadSpaces()
+    await Promise.all([
+      libraryStore.loadSpaces(),
+      workflowStore.loadModels(),
+      workflowStore.loadLanguages(),
+      workflowStore.loadOutputFormats(),
+    ])
   } catch (e) {
-    console.error('loadSpaces error:', e)
+    console.error('initial load error:', e)
   }
 })
 
@@ -85,6 +90,11 @@ function getMultiFieldValues(field, node) {
 function getNodeSchema(node) {
   if (!node) return null
   return node.schema || workflowStore.nodeSchemas[node.schemaKey] || null
+}
+
+function getFieldUnsupportedHint(field) {
+  if (!field?.key) return ''
+  return workflowStore.unsupportedFieldHints?.[field.key] || ''
 }
 
 // ==================== 文档库选择相关 ====================
@@ -401,6 +411,7 @@ const executionButtonText = computed(() => {
           <div class="config-group-label">运行设置</div>
           <div class="field">
             <label class="field-label">并发数量</label>
+            <div class="field-badge field-badge-warning">暂不支持</div>
             <div class="range-row">
               <input type="range" min="1" max="10" value="3" class="range-input" />
               <span class="range-val">3 个文档/批</span>
@@ -408,11 +419,13 @@ const executionButtonText = computed(() => {
           </div>
           <div class="field field-toggle-row">
             <label class="field-label">出错时继续</label>
-            <div class="toggle-switch on" @click="$event.target.classList.toggle('on')"></div>
+            <div class="field-badge field-badge-warning">暂不支持</div>
+            <div class="toggle-switch on"></div>
           </div>
           <div class="field field-toggle-row">
             <label class="field-label">出错通知</label>
-            <div class="toggle-switch on" @click="$event.target.classList.toggle('on')"></div>
+            <div class="field-badge field-badge-warning">暂不支持</div>
+            <div class="toggle-switch on"></div>
           </div>
         </div>
 
@@ -560,10 +573,12 @@ const executionButtonText = computed(() => {
             <!-- ===== Select ===== -->
             <div v-else-if="field.type === 'select'" class="field">
               <label class="field-label">{{ field.label }}</label>
+              <div v-if="getFieldUnsupportedHint(field)" class="field-badge field-badge-warning">{{ getFieldUnsupportedHint(field) }}</div>
               <select
                 class="config-select"
                 :value="normalizeFieldValue(getFieldValue(field, workflowStore.selectedNode))"
                 @change="updateConfig(field.key, $event.target.value)"
+                :disabled="Boolean(getFieldUnsupportedHint(field))"
               >
                 <option
                   v-for="opt in (field.options || [])"
@@ -576,27 +591,32 @@ const executionButtonText = computed(() => {
             <!-- ===== Input ===== -->
             <div v-else-if="field.type === 'input'" class="field">
               <label class="field-label">{{ field.label }}</label>
+              <div v-if="getFieldUnsupportedHint(field)" class="field-badge field-badge-warning">{{ getFieldUnsupportedHint(field) }}</div>
               <input
                 class="config-input"
                 type="text"
                 :value="getFieldValue(field, workflowStore.selectedNode)"
                 @input="updateConfig(field.key, $event.target.value)"
+                :disabled="Boolean(getFieldUnsupportedHint(field))"
               />
             </div>
 
             <!-- ===== Textarea ===== -->
             <div v-else-if="field.type === 'textarea'" class="field">
               <label class="field-label">{{ field.label }}</label>
+              <div v-if="getFieldUnsupportedHint(field)" class="field-badge field-badge-warning">{{ getFieldUnsupportedHint(field) }}</div>
               <textarea
                 class="config-textarea"
                 :value="getFieldValue(field, workflowStore.selectedNode)"
                 @input="updateConfig(field.key, $event.target.value)"
+                :disabled="Boolean(getFieldUnsupportedHint(field))"
               ></textarea>
             </div>
 
             <!-- ===== Range ===== -->
             <div v-else-if="field.type === 'range'" class="field">
               <label class="field-label">{{ field.label }}</label>
+              <div v-if="getFieldUnsupportedHint(field)" class="field-badge field-badge-warning">{{ getFieldUnsupportedHint(field) }}</div>
               <div class="range-row">
                 <input
                   type="range"
@@ -605,6 +625,7 @@ const executionButtonText = computed(() => {
                   :max="field.max"
                   :value="getFieldValue(field, workflowStore.selectedNode)"
                   @input="updateConfig(field.key, Number($event.target.value))"
+                  :disabled="Boolean(getFieldUnsupportedHint(field))"
                 />
                 <span class="range-val">{{ getFieldValue(field, workflowStore.selectedNode) || field.min }} {{ field.unit }}</span>
               </div>
@@ -613,23 +634,25 @@ const executionButtonText = computed(() => {
             <!-- ===== Toggle ===== -->
             <div v-else-if="field.type === 'toggle'" class="field field-toggle-row">
               <label class="field-label">{{ field.label }}</label>
+              <div v-if="getFieldUnsupportedHint(field)" class="field-badge field-badge-warning">{{ getFieldUnsupportedHint(field) }}</div>
               <div
                 class="toggle-switch"
                 :class="{ on: getFieldValue(field, workflowStore.selectedNode) }"
-                @click="updateConfig(field.key, !getFieldValue(field, workflowStore.selectedNode)); $event.target.classList.toggle('on')"
+                @click="!getFieldUnsupportedHint(field) && (updateConfig(field.key, !getFieldValue(field, workflowStore.selectedNode)), $event.target.classList.toggle('on'))"
               ></div>
             </div>
 
             <!-- ===== Multi-select tags ===== -->
             <div v-else-if="field.type === 'multiselect' || field.type === 'select-multiple'" class="field">
               <label class="field-label">{{ field.label }}</label>
+              <div v-if="getFieldUnsupportedHint(field)" class="field-badge field-badge-warning">{{ getFieldUnsupportedHint(field) }}</div>
               <div class="tag-grid">
                 <div
                   v-for="opt in (field.options || [])"
                   :key="optionValue(opt)"
                   class="tag-chip"
                   :class="{ active: getMultiFieldValues(field, workflowStore.selectedNode).includes(optionValue(opt)) }"
-                  @click="toggleMulti(field.key, optionValue(opt), !getMultiFieldValues(field, workflowStore.selectedNode).includes(optionValue(opt)))"
+                  @click="!getFieldUnsupportedHint(field) && toggleMulti(field.key, optionValue(opt), !getMultiFieldValues(field, workflowStore.selectedNode).includes(optionValue(opt)))"
                 >{{ optionLabel(opt) }}</div>
               </div>
             </div>
@@ -1147,6 +1170,21 @@ const executionButtonText = computed(() => {
 
 .field-hint {
   margin-top: 6px;
+}
+
+.field-badge {
+  display: inline-block;
+  margin: 4px 0 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.field-badge-warning {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.28);
 }
 
 .hint-loading {
