@@ -486,6 +486,12 @@ function userMessageAttachments(msg) {
             <!-- 助手消息 -->
             <div v-else class="message-bubble" :class="{ 'md-content': msg.role === 'assistant' }">
               <div v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)"></div>
+              <!-- Loading 动画 -->
+              <div v-if="msg.isLoading" class="typing-indicator">
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+              </div>
               <!-- 表格填表预览：每条消息只取一次 bundle（computed 预聚合 + 单次 list 迭代） -->
               <template v-for="tb in tablePreviewBundleList(msg, index)" :key="(msg.id != null ? msg.id : index) + '-tbl'">
                 <div class="entity-preview table-fill-preview">
@@ -1062,5 +1068,41 @@ function userMessageAttachments(msg) {
 .table-fill-stats-inline {
   margin-left: 8px;
   font-weight: 500;
+}
+
+/* Loading 动画 */
+.typing-indicator {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 4px 0;
+}
+
+.typing-dot {
+  width: 6px;
+  height: 6px;
+  background: #6b7280;
+  border-radius: 50%;
+  animation: typing-bounce 1.4s infinite ease-in-out both;
+}
+
+.typing-dot:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes typing-bounce {
+  0%, 80%, 100% {
+    transform: scale(0);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 </style>

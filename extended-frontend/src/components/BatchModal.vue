@@ -17,7 +17,15 @@ const isProcessing = ref(false)
 const progress = ref(0)
 const progressList = ref([])
 
-const canStart = computed(() => !isProcessing.value && progress.value === 0)
+const canStart = computed(() =>
+  !isProcessing.value &&
+  progress.value === 0 &&
+  (workflowStore.selectedDocs.length > 0 || workflowStore.localFiles.length > 0)
+)
+
+const totalDocs = computed(() =>
+  workflowStore.selectedDocs.length + workflowStore.localFiles.length
+)
 
 function closeModal() {
   if (!isProcessing.value) {
@@ -32,14 +40,17 @@ async function startProcess() {
   progress.value = 0
   progressList.value = []
 
-  const docs = workflowStore.selectedDocs
+  const docs = [
+    ...workflowStore.selectedDocs.map(d => ({ name: d.name, size: d.size })),
+    ...workflowStore.localFiles.map(f => ({ name: f.name, size: f.size }))
+  ]
 
   for (let i = 0; i < docs.length; i++) {
     const doc = docs[i]
     progressList.value.push({ name: doc.name, status: 'processing', icon: '⏳' })
 
-    // Simulate processing
-    await new Promise(resolve => setTimeout(resolve, 800))
+    // 模拟处理（实际由后端执行）
+    await new Promise(resolve => setTimeout(resolve, 600))
 
     progressList.value[i] = { name: doc.name, status: 'completed', icon: '✅' }
     progress.value = Math.round(((i + 1) / docs.length) * 100)
@@ -52,6 +63,22 @@ function getProgressText() {
   if (isProcessing.value) return '处理中...'
   if (progress.value === 100) return '处理完成！'
   return '准备就绪'
+}
+
+// 合并显示文档列表
+const displayDocs = computed(() => {
+  const list = [
+    ...workflowStore.selectedDocs.map(d => ({ name: d.name, size: d.size })),
+    ...workflowStore.localFiles.map(f => ({ name: f.name, size: _formatSize(f.size) }))
+  ]
+  return list
+})
+
+function _formatSize(bytes) {
+  if (!bytes) return ''
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
 }
 </script>
 
@@ -71,20 +98,25 @@ function getProgressText() {
         </p>
 
         <!-- Document List -->
-        <div class="modal-docs">
+        <div class="modal-docs" v-if="displayDocs.length > 0">
           <div
-            v-for="doc in workflowStore.selectedDocs"
-            :key="doc.id"
+            v-for="(doc, i) in displayDocs"
+            :key="i"
             class="modal-doc"
           >
-            <span>📕</span>
+            <span>📄</span>
             <span style="flex:1;">{{ doc.name }}</span>
             <span style="color: var(--text-muted); font-size: 12px;">{{ doc.size }}</span>
           </div>
-          <div class="modal-doc" style="color: var(--text-muted);">
-            <span>...</span>
-            <span style="flex:1;">还有 {{ Math.max(0, 10 - workflowStore.selectedDocs.length) }} 个文档</span>
+          <div v-if="displayDocs.length === 0" class="modal-doc-empty">
+            暂未选择任何文档，请先在配置面板中选择文档
           </div>
+        </div>
+
+        <div v-else class="modal-docs-empty">
+          <div class="empty-icon">📭</div>
+          <div class="empty-text">暂未选择文档</div>
+          <div class="empty-hint">请先在配置面板中选择文档来源</div>
         </div>
 
         <!-- Progress -->
@@ -118,9 +150,45 @@ function getProgressText() {
           @click="startProcess"
           :disabled="!canStart"
         >
-          {{ isProcessing ? '处理中...' : '开始处理' }}
+          {{ isProcessing ? '处理中...' : `开始处理 (${totalDocs} 个文档)` }}
         </button>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.modal-docs-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 32px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--border-color);
+}
+
+.empty-icon {
+  font-size: 40px;
+  opacity: 0.4;
+}
+
+.empty-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.empty-hint {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.modal-doc-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+</style>

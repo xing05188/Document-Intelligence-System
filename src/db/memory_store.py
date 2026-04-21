@@ -278,3 +278,185 @@ def delete_session_file(
                 files.pop(i)
                 return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# 文档库（内存存储，数据库未启用时使用）
+# ---------------------------------------------------------------------------
+
+_library_store_spaces: List[dict] = []
+_library_store_docs: List[dict] = []
+_library_store_next_space_id = 1
+_library_store_next_doc_id = 1
+
+
+def memory_create_library_space(
+    name: str,
+    icon: str = "📁",
+    description: Optional[str] = None,
+    config=None,
+    user_id: Optional[str] = None,
+):
+    global _library_store_next_space_id
+    from db.library_repository import LibrarySpaceRow
+    sid = str(uuid.uuid4())
+    now = datetime.utcnow()
+    _library_store_spaces.append({
+        "id": sid,
+        "user_id": user_id,
+        "name": name,
+        "icon": icon,
+        "description": description,
+        "created_at": now,
+        "updated_at": now,
+        "_num": _library_store_next_space_id,
+    })
+    _library_store_next_space_id += 1
+    doc_count = sum(1 for d in _library_store_docs if d["space_id"] == sid and d.get("deleted_at") is None)
+    return LibrarySpaceRow(
+        id=sid, user_id=user_id, name=name, icon=icon,
+        description=description, created_at=now, updated_at=now, doc_count=doc_count,
+    )
+
+
+def memory_get_library_spaces(config=None, user_id: Optional[str] = None):
+    from db.library_repository import LibrarySpaceRow
+    result = []
+    for s in _library_store_spaces:
+        if user_id and s.get("user_id") and s["user_id"] != user_id:
+            continue
+        doc_count = sum(1 for d in _library_store_docs if d["space_id"] == s["id"] and d.get("deleted_at") is None)
+        result.append(LibrarySpaceRow(
+            id=str(s["id"]), user_id=s.get("user_id"), name=s["name"], icon=s.get("icon", "📁"),
+            description=s.get("description"), created_at=s["created_at"], updated_at=s["updated_at"],
+            doc_count=doc_count,
+        ))
+    return result
+
+
+def memory_get_library_space_by_id(space_id: str, config=None):
+    from db.library_repository import LibrarySpaceRow
+    for s in _library_store_spaces:
+        if str(s["id"]) == space_id:
+            doc_count = sum(1 for d in _library_store_docs if d["space_id"] == s["id"] and d.get("deleted_at") is None)
+            return LibrarySpaceRow(
+                id=str(s["id"]), user_id=s.get("user_id"), name=s["name"], icon=s.get("icon", "📁"),
+                description=s.get("description"), created_at=s["created_at"], updated_at=s["updated_at"],
+                doc_count=doc_count,
+            )
+    return None
+
+
+def memory_update_library_space(space_id, name=None, icon=None, description=None, config=None, user_id=None):
+    from db.library_repository import LibrarySpaceRow
+    for s in _library_store_spaces:
+        if str(s["id"]) == space_id:
+            if name is not None:
+                s["name"] = name
+            if icon is not None:
+                s["icon"] = icon
+            if description is not None:
+                s["description"] = description
+            s["updated_at"] = datetime.utcnow()
+            doc_count = sum(1 for d in _library_store_docs if d["space_id"] == s["id"] and d.get("deleted_at") is None)
+            return LibrarySpaceRow(
+                id=str(s["id"]), user_id=s.get("user_id"), name=s["name"], icon=s.get("icon", "📁"),
+                description=s.get("description"), created_at=s["created_at"], updated_at=s["updated_at"],
+                doc_count=doc_count,
+            )
+    return None
+
+
+def memory_delete_library_space(space_id, config=None):
+    global _library_store_spaces
+    _library_store_spaces = [s for s in _library_store_spaces if str(s["id"]) != space_id]
+    _library_store_docs[:] = [d for d in _library_store_docs if str(d["space_id"]) != space_id]
+    return True
+
+
+def memory_add_library_doc(
+    space_id, file_name, file_size, config=None, user_id=None,
+    mime_type=None, storage_key=None, blob_url=None,
+):
+    from db.library_repository import LibraryDocRow
+    global _library_store_next_doc_id
+    did = str(uuid.uuid4())
+    now = datetime.utcnow()
+    _library_store_docs.append({
+        "id": did,
+        "space_id": space_id,
+        "user_id": user_id,
+        "file_name": file_name,
+        "file_size": file_size,
+        "mime_type": mime_type,
+        "file_extension": file_name.rsplit(".", 1)[-1].lower() if "." in file_name else None,
+        "storage_key": storage_key,
+        "blob_url": blob_url,
+        "created_at": now,
+        "updated_at": now,
+        "deleted_at": None,
+        "_num": _library_store_next_doc_id,
+    })
+    _library_store_next_doc_id += 1
+    return LibraryDocRow(
+        id=did, space_id=space_id, user_id=user_id, file_name=file_name,
+        file_size=file_size, mime_type=mime_type,
+        file_extension=file_name.rsplit(".", 1)[-1].lower() if "." in file_name else None,
+        storage_key=storage_key, blob_url=blob_url,
+        created_at=now, updated_at=now, deleted_at=None,
+    )
+
+
+def memory_get_library_docs(space_id, config=None, user_id=None):
+    from db.library_repository import LibraryDocRow
+    result = []
+    for d in _library_store_docs:
+        if str(d["space_id"]) != space_id or d.get("deleted_at") is not None:
+            continue
+        if user_id and d.get("user_id") and d["user_id"] != user_id:
+            continue
+        result.append(LibraryDocRow(
+            id=str(d["id"]), space_id=str(d["space_id"]), user_id=d.get("user_id"),
+            file_name=d["file_name"], file_size=d.get("file_size", 0),
+            mime_type=d.get("mime_type"), file_extension=d.get("file_extension"),
+            storage_key=d.get("storage_key"), blob_url=d.get("blob_url"),
+            created_at=d["created_at"], updated_at=d["updated_at"], deleted_at=d.get("deleted_at"),
+        ))
+    return result
+
+
+def memory_get_library_doc_by_id(doc_id, config=None, user_id=None):
+    from db.library_repository import LibraryDocRow
+    for d in _library_store_docs:
+        if str(d["id"]) == doc_id and d.get("deleted_at") is None:
+            return LibraryDocRow(
+                id=str(d["id"]), space_id=str(d["space_id"]), user_id=d.get("user_id"),
+                file_name=d["file_name"], file_size=d.get("file_size", 0),
+                mime_type=d.get("mime_type"), file_extension=d.get("file_extension"),
+                storage_key=d.get("storage_key"), blob_url=d.get("blob_url"),
+                created_at=d["created_at"], updated_at=d["updated_at"], deleted_at=d.get("deleted_at"),
+            )
+    return None
+
+
+def memory_update_library_doc(doc_id, config=None, user_id=None):
+    from db.library_repository import LibraryDocRow
+    for d in _library_store_docs:
+        if str(d["id"]) == doc_id and d.get("deleted_at") is None:
+            d["updated_at"] = datetime.utcnow()
+            return LibraryDocRow(
+                id=str(d["id"]), space_id=str(d["space_id"]), user_id=d.get("user_id"),
+                file_name=d["file_name"], file_size=d.get("file_size", 0),
+                mime_type=d.get("mime_type"), file_extension=d.get("file_extension"),
+                storage_key=d.get("storage_key"), blob_url=d.get("blob_url"),
+                created_at=d["created_at"], updated_at=d["updated_at"], deleted_at=d.get("deleted_at"),
+            )
+    return None
+
+
+def memory_delete_library_doc(doc_id, config=None, user_id=None):
+    for d in _library_store_docs:
+        if str(d["id"]) == doc_id and d.get("deleted_at") is None:
+            d["deleted_at"] = datetime.utcnow()
+            return True
+    return False

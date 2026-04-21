@@ -23,6 +23,7 @@ MIGRATION_FILES = [
     ROOT / "sql" / "001_create_sessions_tables.sql",
     ROOT / "sql" / "schema_v1.sql",
     ROOT / "sql" / "002_auth_user_file_scope.sql",
+    ROOT / "sql" / "003_library_tables.sql",
 ]
 
 REQUIRED_TABLES = [
@@ -32,7 +33,14 @@ REQUIRED_TABLES = [
     "messages",
     "session_files",
     "tasks",
+    "task_steps",
     "document_assets",
+    "extraction_results",
+    "agent_execution_logs",
+    "fill_reports",
+    "audit_logs",
+    "document_spaces",
+    "library_documents",
 ]
 
 REQUIRED_COLUMNS = {
@@ -50,7 +58,7 @@ REQUIRED_COLUMNS = {
         "deleted_at",
     ],
     "tasks": ["user_id", "session_id", "source_mode"],
-    "document_assets": ["user_id", "session_id"],
+    "library_documents": ["space_id", "user_id"],
 }
 
 
