@@ -1,5 +1,5 @@
 前端：
-cd frontend
+cd extended-frontend
 npm install
 npm run dev
 
