@@ -354,6 +354,16 @@ const executionButtonText = computed(() => {
   const verb = verbMap[title] || '处理'
   return `开始${verb}`
 })
+
+function nodeStatusText(status) {
+  const map = {
+    pending: '等待中',
+    running: '执行中',
+    completed: '已完成',
+    failed: '失败'
+  }
+  return map[status] || '未开始'
+}
 </script>
 
 <template>
@@ -854,6 +864,23 @@ const executionButtonText = computed(() => {
         <div v-if="workflowStore.isExecuting || workflowStore.executionLogs.length > 0" class="execution-status">
           <div class="exec-progress-bar">
             <div class="exec-progress-fill" :style="{ width: workflowStore.executionProgress + '%' }"></div>
+          </div>
+          <div v-if="workflowStore.nodeProgress.length > 0" class="node-progress-list">
+            <div
+              v-for="item in workflowStore.nodeProgress"
+              :key="item.id"
+              class="node-progress-item"
+              :class="'node-progress-' + item.status"
+            >
+              <div class="node-progress-main">
+                <span class="node-progress-index">{{ item.index }}</span>
+                <span class="node-progress-title">{{ item.title }}</span>
+                <span class="node-progress-state">{{ nodeStatusText(item.status) }}</span>
+              </div>
+              <div class="node-progress-track">
+                <div class="node-progress-fill" :style="{ width: (item.progress || 0) + '%' }"></div>
+              </div>
+            </div>
           </div>
           <div class="exec-logs">
             <div
@@ -1383,6 +1410,89 @@ const executionButtonText = computed(() => {
   background: linear-gradient(90deg, var(--accent-success), var(--accent-cyan));
   border-radius: 3px;
   transition: width 0.5s ease;
+}
+
+.node-progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.node-progress-item {
+  padding: 8px 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.node-progress-main {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.node-progress-index {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.node-progress-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.node-progress-state {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.node-progress-track {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--bg-tertiary);
+}
+
+.node-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--text-muted);
+  transition: width 0.35s ease;
+}
+
+.node-progress-running .node-progress-index,
+.node-progress-running .node-progress-fill {
+  background: var(--accent-cyan);
+  color: #06202a;
+}
+
+.node-progress-completed .node-progress-index,
+.node-progress-completed .node-progress-fill {
+  background: var(--accent-success);
+  color: white;
+}
+
+.node-progress-failed .node-progress-index,
+.node-progress-failed .node-progress-fill {
+  background: #ef4444;
+  color: white;
 }
 
 .exec-logs {

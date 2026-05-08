@@ -2146,6 +2146,20 @@ input, textarea, select {
   box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.2), var(--shadow-lg);
 }
 
+.workflow-node.run-running {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.18), var(--shadow-lg);
+}
+
+.workflow-node.run-completed {
+  border-color: rgba(16, 185, 129, 0.7);
+}
+
+.workflow-node.run-failed {
+  border-color: rgba(239, 68, 68, 0.85);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.16), var(--shadow-lg);
+}
+
 .node-header {
   display: flex;
   align-items: center;
@@ -2179,6 +2193,43 @@ input, textarea, select {
   padding: 12px 16px;
   font-size: 13px;
   color: var(--text-secondary);
+}
+
+.node-run-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 16px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 220px;
+}
+
+.node-run-status span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-run-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.workflow-node.run-running .node-run-dot {
+  background: var(--accent-cyan);
+}
+
+.workflow-node.run-completed .node-run-dot {
+  background: var(--accent-success);
+}
+
+.workflow-node.run-failed .node-run-dot {
+  background: #ef4444;
 }
 
 .node-port {
@@ -2415,6 +2466,36 @@ input, textarea, select {
 
 .step-item.step-done .step-name {
   color: var(--accent-success);
+}
+
+.canvas-step-bar .step-item.run-running .step-num {
+  background: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  color: #06202a;
+}
+
+.canvas-step-bar .step-item.run-running .step-name {
+  color: var(--accent-cyan);
+}
+
+.canvas-step-bar .step-item.run-completed .step-num {
+  background: var(--accent-success);
+  border-color: var(--accent-success);
+  color: white;
+}
+
+.canvas-step-bar .step-item.run-completed .step-name {
+  color: var(--accent-success);
+}
+
+.canvas-step-bar .step-item.run-failed .step-num {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: white;
+}
+
+.canvas-step-bar .step-item.run-failed .step-name {
+  color: #ef4444;
 }
 
 .step-item.step-done .step-line,

@@ -122,6 +122,11 @@ class ExecutionResponse(BaseModel):
     current_file_index: int = 0
     total_files: int = 0
     current_file_name: str = ""
+    current_node_id: str = ""
+    current_node_name: str = ""
+    current_node_index: int = 0
+    total_nodes: int = 0
+    node_progress: List[Dict[str, Any]] = Field(default_factory=list)
     logs: List[Dict[str, str]] = Field(default_factory=list)
     output_files: List[Dict[str, Any]] = Field(default_factory=list)
     error: Optional[str] = None
@@ -145,10 +150,17 @@ def _get_output_config(nodes: List[WorkflowNode]) -> Dict[str, Any]:
         if node.type != "output":
             continue
         cv = dict(node.configValues or {})
+        cv["_schemaKey"] = node.schemaKey
+        if node.schemaKey == "schema-save-excel":
+            cv.setdefault("outputFormat", "xlsx")
+        elif node.schemaKey == "schema-save-text":
+            cv.setdefault("outputFormat", "txt")
         if not first_output:
             first_output = cv
         # 画布上可能存在多个输出型节点时的歧义处理
         if node.schemaKey == "schema-library-output":
+            return cv
+        if node.schemaKey in {"schema-save-excel", "schema-save-text"}:
             return cv
     return first_output
 
@@ -176,6 +188,78 @@ def _get_processing_nodes(nodes: List[WorkflowNode]) -> List[WorkflowNode]:
         if node.type not in ("input", "output"):
             processing.append(node)
     return processing
+
+
+def _build_node_progress(nodes: List[WorkflowNode]) -> List[Dict[str, Any]]:
+    progress_items: List[Dict[str, Any]] = []
+    for idx, node in enumerate(nodes, start=1):
+        progress_items.append(
+            {
+                "id": node.id,
+                "title": node.title,
+                "type": node.type,
+                "schemaKey": node.schemaKey,
+                "index": idx,
+                "status": "pending",
+                "progress": 0,
+                "message": "",
+            }
+        )
+    return progress_items
+
+
+def _validate_execute_request(request: ExecuteRequest) -> List[str]:
+    errors: List[str] = []
+    for idx, node in enumerate(request.nodes, start=1):
+        schema_key = str(node.schemaKey or "").strip()
+        cv = node.configValues or {}
+        title = node.title or schema_key or f"第{idx}个节点"
+
+        if schema_key == "schema-data-process":
+            process_kind = str(cv.get("processKind") or "").strip()
+            if process_kind not in {"sort", "filter", "aggregate", "dedupe", "fill_null", "computed_column", "merge_columns", "split_column"}:
+                errors.append(f"{title}：processKind配置无效")
+            required_by_kind = {
+                "sort": ["sortColumn"],
+                "filter": ["filterExpr"],
+                "aggregate": ["aggregateColumn", "aggregateOp"],
+                "fill_null": ["fillColumns"],
+                "computed_column": ["computedColumnName", "computedFormula"],
+                "merge_columns": ["mergeSourceColumns", "mergeTargetColumn"],
+                "split_column": ["splitSourceColumn", "splitIntoColumns"],
+            }
+            missing = [key for key in required_by_kind.get(process_kind, []) if not str(cv.get(key) or "").strip()]
+            if missing:
+                errors.append(f"{title}：缺少配置 {', '.join(missing)}")
+        elif schema_key == "schema-data-clean":
+            rules = cv.get("cleanRules")
+            if not rules:
+                errors.append(f"{title}：cleanRules不能为空")
+        elif schema_key == "schema-table-extract":
+            strategy = str(cv.get("tableStrategy") or "first").strip()
+            if strategy not in {"first", "all", "by_index"}:
+                errors.append(f"{title}：tableStrategy配置无效")
+            if strategy == "by_index":
+                try:
+                    if int(cv.get("tableIndex")) <= 0:
+                        raise ValueError()
+                except Exception:
+                    errors.append(f"{title}：tableIndex必须是从1开始的正整数")
+        elif schema_key == "schema-save-excel":
+            sheet_name = str(cv.get("sheetName") or "Sheet1")
+            if len(sheet_name) > 31:
+                errors.append(f"{title}：sheetName不能超过31个字符")
+            if any(ch in sheet_name for ch in '[]:*?/\\'):
+                errors.append(f"{title}：sheetName不能包含 []:*?/\\")
+        elif schema_key == "schema-save-text":
+            encoding = str(cv.get("outputEncoding") or "utf-8").lower()
+            if encoding not in {"utf-8", "gbk"}:
+                errors.append(f"{title}：outputEncoding仅支持utf-8或gbk")
+            line_ending = str(cv.get("lineEnding") or "lf").lower()
+            if line_ending not in {"lf", "crlf"}:
+                errors.append(f"{title}：lineEnding仅支持lf或crlf")
+
+    return errors
 
 
 # 语言 code → 人类可读名称映射
@@ -253,11 +337,33 @@ def _detect_file_type(name: str) -> FileType:
 def _make_progress_callback(execution_id: str):
     """生成一个向执行状态写入进度日志的回调。"""
 
-    def callback(progress: int, total: int, message: str):
+    def callback(progress: int, total: int, message: str, **kwargs):
         if execution_id not in _EXECUTION_STATES:
             return
         state = _EXECUTION_STATES[execution_id]
-        state["progress"] = max(state["progress"], int(progress / max(total, 1) * 100))
+        file_index = int(state.get("current_file_index") or 1)
+        total_files = max(int(state.get("total_files") or 1), 1)
+        node_ratio = max(0.0, min(float(progress) / max(total, 1), 1.0))
+        overall = int(((file_index - 1) + node_ratio) / total_files * 100)
+        state["progress"] = max(0, min(overall, 99 if state.get("status") == "running" else 100))
+
+        node_id = str(kwargs.get("node_id") or "")
+        node_title = str(kwargs.get("node_title") or "")
+        node_index = int(kwargs.get("node_index") or progress or 0)
+        node_status = str(kwargs.get("node_status") or "running")
+        node_item_progress = int(kwargs.get("node_progress") if kwargs.get("node_progress") is not None else (100 if node_status == "completed" else 50))
+
+        if node_id or node_title:
+            state["current_node_id"] = node_id
+            state["current_node_name"] = node_title
+            state["current_node_index"] = node_index
+            state["total_nodes"] = max(int(state.get("total_nodes") or total or 0), int(total or 0))
+            for item in state.get("node_progress", []):
+                if (node_id and item.get("id") == node_id) or (not node_id and item.get("title") == node_title):
+                    item["status"] = node_status
+                    item["progress"] = max(0, min(node_item_progress, 100))
+                    item["message"] = message
+                    break
         state["logs"].append({"type": "info", "message": message})
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         _persist_execution_states()
@@ -379,6 +485,11 @@ async def _run_execution(execution_id: str, params: ExecuteRequest):
             state["current_file_index"] = idx + 1
             state["current_file_name"] = file_info.name
             state["progress"] = int(idx / len(source_files) * 100)
+            state["current_node_id"] = ""
+            state["current_node_name"] = ""
+            state["current_node_index"] = 0
+            state["total_nodes"] = len(params.nodes)
+            state["node_progress"] = _build_node_progress(params.nodes)
             state["logs"].append(
                 {"type": "info", "message": f"[{idx + 1}/{len(source_files)}] 正在处理: {file_info.name}"}
             )
@@ -403,6 +514,9 @@ async def _run_execution(execution_id: str, params: ExecuteRequest):
                         "namingRule": naming_rule,
                         "targetLanguage": target_language,
                         "savePath": output_config.get("savePath"),
+                        "sheetName": output_config.get("sheetName"),
+                        "outputEncoding": output_config.get("outputEncoding"),
+                        "lineEnding": output_config.get("lineEnding"),
                         "notifyOnComplete": output_config.get("notifyOnComplete"),
                     },
                     "input_config": input_config,
@@ -536,6 +650,10 @@ async def execute_workflow(request: ExecuteRequest, background_tasks: Background
     启动工作流执行（逐文件处理）。
     立即返回 execution_id，前端通过 GET /executions/{id} 轮询进度。
     """
+    validation_errors = _validate_execute_request(request)
+    if validation_errors:
+        raise HTTPException(status_code=400, detail="；".join(validation_errors))
+
     execution_id = uuid.uuid4().hex
 
     _EXECUTION_STATES[execution_id] = {
@@ -544,6 +662,11 @@ async def execute_workflow(request: ExecuteRequest, background_tasks: Background
         "current_file_index": 0,
         "total_files": 0,
         "current_file_name": "",
+        "current_node_id": "",
+        "current_node_name": "",
+        "current_node_index": 0,
+        "total_nodes": len(request.nodes),
+        "node_progress": _build_node_progress(request.nodes),
         "logs": [{"type": "info", "message": "任务已启动，正在初始化..."}],
         "output_files": [],
         "error": None,
@@ -694,6 +817,11 @@ async def get_execution_status(execution_id: str):
         current_file_index=state["current_file_index"],
         total_files=state["total_files"],
         current_file_name=state["current_file_name"],
+        current_node_id=state.get("current_node_id", ""),
+        current_node_name=state.get("current_node_name", ""),
+        current_node_index=state.get("current_node_index", 0),
+        total_nodes=state.get("total_nodes", 0),
+        node_progress=state.get("node_progress", []),
         logs=state["logs"],
         output_files=state["output_files"],
         error=state["error"],
@@ -736,6 +864,7 @@ async def list_output_formats():
         {"code": "pdf", "name": "PDF"},
         {"code": "md", "name": "Markdown"},
         {"code": "txt", "name": "纯文本"},
+        {"code": "xlsx", "name": "Excel"},
     ]
 
 
