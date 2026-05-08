@@ -237,6 +237,18 @@ const connPaths = computed(() => {
   })
 })
 
+const nodeProgressById = computed(() => {
+  const map = {}
+  ;(workflowStore.nodeProgress || []).forEach(item => {
+    if (item?.id) map[item.id] = item
+  })
+  return map
+})
+
+function getNodeRunState(nodeId) {
+  return nodeProgressById.value[nodeId]?.status || 'idle'
+}
+
 // 当前选中节点在数组中的索引
 const selectedIndex = computed(() => {
   if (!workflowStore.selectedNodeId) return -1
@@ -268,7 +280,8 @@ const selectedIndex = computed(() => {
             class="step-item"
             :class="{
               'step-done': selectedIndex > -1 && i < selectedIndex,
-              'step-active': workflowStore.selectedNodeId === node.id
+              'step-active': workflowStore.selectedNodeId === node.id,
+              ['run-' + getNodeRunState(node.id)]: true
             }"
           >
             <div class="step-num">{{ i + 1 }}</div>
@@ -300,7 +313,7 @@ const selectedIndex = computed(() => {
           v-for="(node, i) in workflowStore.canvasNodes"
           :key="node.id"
           class="workflow-node"
-          :class="{ selected: workflowStore.selectedNodeId === node.id, ['type-' + node.type]: true }"
+          :class="{ selected: workflowStore.selectedNodeId === node.id, ['type-' + node.type]: true, ['run-' + getNodeRunState(node.id)]: true }"
           :style="{ left: node.x + 'px', top: node.y + 'px' }"
           @click="handleNodeClick($event, node.id)"
           @mousedown="onNodeMouseDown($event, node.id)"
@@ -339,6 +352,10 @@ const selectedIndex = computed(() => {
             >×</button>
           </div>
           <div class="node-body">{{ node.body }}</div>
+          <div v-if="getNodeRunState(node.id) !== 'idle'" class="node-run-status">
+            <span class="node-run-dot"></span>
+            <span>{{ nodeProgressById[node.id]?.message || nodeProgressById[node.id]?.status }}</span>
+          </div>
           <div class="node-port output-port"></div>
         </div>
       </div>

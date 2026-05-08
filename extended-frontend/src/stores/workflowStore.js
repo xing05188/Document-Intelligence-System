@@ -534,6 +534,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const executionProgress = ref(0)
   const executionLogs = ref([])
   const outputFiles = ref([])
+  const nodeProgress = ref([])
+  const currentNodeId = ref('')
+  const currentNodeName = ref('')
 
   // ==================== 计算属性 ====================
 
@@ -983,6 +986,19 @@ export const useWorkflowStore = defineStore('workflow', () => {
     isExecuting.value = true
     executionProgress.value = 0
     executionLogs.value = []
+    outputFiles.value = []
+    nodeProgress.value = canvasNodes.value.map((n, idx) => ({
+      id: n.id,
+      title: n.title,
+      type: n.type,
+      schemaKey: n.schemaKey,
+      index: idx + 1,
+      status: 'pending',
+      progress: 0,
+      message: ''
+    }))
+    currentNodeId.value = ''
+    currentNodeName.value = ''
 
     try {
       // 将本地文件转为 base64 发送（逐字节避免栈溢出）
@@ -1036,6 +1052,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
       try {
         const res = await workflowApi.getExecutionStatus(executionId)
         const status = res?.status
+        nodeProgress.value = Array.isArray(res?.node_progress) ? res.node_progress : nodeProgress.value
+        currentNodeId.value = res?.current_node_id || ''
+        currentNodeName.value = res?.current_node_name || ''
         if (status === 'completed') {
           executionProgress.value = 100
           // 追加 output_files
@@ -1203,6 +1222,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
     executionProgress,
     executionLogs,
     outputFiles,
+    nodeProgress,
+    currentNodeId,
+    currentNodeName,
     // 计算属性
     currentWorkflow,
     customWorkflows,
