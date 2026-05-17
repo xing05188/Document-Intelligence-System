@@ -129,6 +129,8 @@ class LLMService:
         provider = self.config.provider.lower()
         if provider == "deepseek":
             return "https://api.deepseek.com/v1"
+        elif provider == "zhipu":
+            return "https://open.bigmodel.cn/api/paas/v4/"
         elif provider == "openai":
             return "https://api.openai.com/v1"
         elif provider == "anthropic":
