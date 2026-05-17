@@ -198,7 +198,11 @@ def load_config() -> SystemConfig:
     elif os.getenv("OPENAI_API_KEY"):
         config.llm.api_key = os.getenv("OPENAI_API_KEY")
     if os.getenv("LLM_PROVIDER"):
-        config.llm.provider = os.getenv("LLM_PROVIDER")
+        provider = os.getenv("LLM_PROVIDER").strip().lower()
+        config.llm.provider = provider
+        if provider == "zhipu":
+            config.llm.base_url = "https://open.bigmodel.cn/api/paas/v4/"
+            config.llm.api_key = os.getenv("ZHIPU_API_KEY") or config.llm.api_key
     if os.getenv("LLM_MODEL"):
         config.llm.model = os.getenv("LLM_MODEL")
     if os.getenv("LLM_BASE_URL"):
