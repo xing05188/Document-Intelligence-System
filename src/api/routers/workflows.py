@@ -30,7 +30,13 @@ from pydantic import BaseModel, Field
 from config import SystemConfig, get_config
 from core.orchestrator.coordinator import WorkflowCoordinator
 from core.orchestrator.task_spec import FileInfo, FileType, TaskSpec, TaskType
-from core.storage import build_blob_name, upload_file_to_storage
+from core.storage import (
+    build_blob_name,
+    get_storage_prefix,
+    upload_file_to_storage,
+    upload_stream_to_storage,
+    download_file_to_local,
+)
 from db.auth_repository import resolve_user_from_authorization
 from db.connection import is_database_configured
 from db.workflow_repository import db_load_execution_states, db_save_execution_states, is_db_enabled
@@ -286,8 +292,22 @@ def _resolve_doc_path(doc_id: str, config: SystemConfig) -> Optional[str]:
     doc = get_library_doc_by_id(doc_id, config=config, user_id=None)
     if doc and doc.storage_key:
         p = Path(doc.storage_key)
+        # 如果 storage_key 是本地路径，直接返回
         if p.exists():
             return str(p)
+        # 如果配置启用了云存储，尝试把远程 blob 下载到本地缓存后返回路径
+        try:
+            if config.storage.enabled:
+                cache_path = Path(config.temp_dir) / "azure_blob_cache" / doc.storage_key
+                # 确保父目录存在
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                # download_file_to_local 会返回目标 Path
+                local_path = download_file_to_local(doc.storage_key, cache_path, config=config)
+                if local_path and Path(local_path).exists():
+                    return str(local_path)
+        except Exception:
+            # 下载失败则继续后续查找逻辑
+            pass
 
     # session 文件
     parts = doc_id.split(":", 1)
@@ -606,11 +626,11 @@ def _save_output_to_library(file_path: str, space_id: str, config: SystemConfig)
         safe_name = f"{file_hash}_{p.name}"
 
         storage_key: Optional[str] = None
-        if config.storage.enabled and config.storage.provider == "azure_blob":
-            from core.storage import build_blob_name, upload_stream_to_storage
+        if config.storage.enabled:
             from io import BytesIO
 
-            blob_name = build_blob_name(space_id, safe_name, prefix=config.storage.azure_blob_prefix or "workflows")
+            blob_prefix = get_storage_prefix(config) or "workflows"
+            blob_name = build_blob_name(space_id, safe_name, prefix=blob_prefix)
             storage_key = upload_stream_to_storage(
                 BytesIO(content_bytes),
                 config=config,

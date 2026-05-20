@@ -442,7 +442,7 @@ input, textarea, select {
 .doc-checkbox {
   position: absolute;
   top: 12px;
-  right: 12px;
+  left: 12px;
   width: 22px;
   height: 22px;
   background: var(--bg-tertiary);
@@ -1006,6 +1006,10 @@ input, textarea, select {
   line-height: 1.7;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
+}
+
+.message.assistant .message-bubble {
+  border: 2px solid #000;
 }
 
 .message.user .message-bubble {

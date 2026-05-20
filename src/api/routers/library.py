@@ -16,6 +16,7 @@ from core.storage import (
     build_blob_name,
     delete_file_from_storage,
     download_file_to_local,
+    get_storage_prefix,
     upload_stream_to_storage,
 )
 from db.auth_repository import resolve_user_from_authorization
@@ -31,6 +32,8 @@ from db.library_repository import (
     get_library_space_by_id,
     get_library_spaces,
 )
+
+from uuid import uuid4
 
 
 router = APIRouter(prefix="/api/library", tags=["文档库管理"])
@@ -282,12 +285,12 @@ async def upload_doc(
     file_hash = _compute_file_hash(content)
 
     storage_key = None
-    if cfg.storage.enabled and cfg.storage.provider == "azure_blob":
-        blob_name = build_blob_name(
-            space_id,
-            f"{file_hash}_{file_name}",
-            prefix=cfg.storage.azure_blob_prefix,
-        )
+    if cfg.storage.enabled:
+        blob_prefix = get_storage_prefix(cfg)
+        # 使用不可读的唯一名作为 blob 名，避免在对象键中包含原始文件名导致的非法字符问题
+        ext = Path(file_name).suffix or ""
+        unique_name = f"{file_hash}_{uuid4().hex}{ext}"
+        blob_name = build_blob_name(space_id, unique_name, prefix=blob_prefix)
         storage_key = upload_stream_to_storage(
             BytesIO(content),
             config=cfg,
@@ -295,7 +298,7 @@ async def upload_doc(
             content_type=file.content_type,
         )
         if not storage_key:
-            raise HTTPException(status_code=502, detail="Azure Blob 上传失败")
+            raise HTTPException(status_code=502, detail="云存储上传失败")
     else:
         # 本地存储
         safe_name = f"{file_hash}_{file_name}"
@@ -384,7 +387,7 @@ async def download_doc(
     file_path = None
 
     # 优先用 storage_key 从云存储下载
-    if storage_key and cfg.storage.enabled and cfg.storage.provider == "azure_blob":
+    if storage_key and cfg.storage.enabled:
         cache_path = Path(cfg.temp_dir) / "azure_blob_cache" / storage_key
         try:
             file_path = download_file_to_local(storage_key, cache_path, config=cfg)

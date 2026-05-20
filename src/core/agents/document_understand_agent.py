@@ -359,7 +359,7 @@ class DocumentAgent(BaseAgent):
         try:
             response = self._llm_service.chat(
                 messages=messages,
-                model="deepseek-chat",
+                model=self._llm_service.config.model,
                 temperature=0
             )
         except Exception as e:
