@@ -28,7 +28,7 @@ _load_project_env()
 @dataclass
 class LLMConfig:
     """LLM模型配置"""
-    provider: str = "deepseek"  # openai, deepseek, anthropic, local
+    provider: str = "deepseek"  # openai, deepseek, anthropic, local, tongji
     model: str = "deepseek-chat"
     api_key: Optional[str] = None
     base_url: Optional[str] = None
@@ -79,6 +79,10 @@ class StorageConfig:
     azure_connection_string: Optional[str] = None
     azure_container_name: str = "document"
     azure_blob_prefix: str = "sessions"
+    supabase_url: Optional[str] = None
+    supabase_service_key: Optional[str] = None
+    supabase_bucket: str = "document"
+    supabase_storage_prefix: str = "sessions"
 
 
 @dataclass
@@ -189,12 +193,17 @@ def load_config() -> SystemConfig:
     """
     config = SystemConfig()
 
-    # LLM配置 (支持 DeepSeek)
+    # LLM配置 (支持 DeepSeek, OpenAI, TongJi 等)
     if os.getenv("DEEPSEEK_API_KEY"):
         config.llm.provider = "deepseek"
         config.llm.api_key = os.getenv("DEEPSEEK_API_KEY")
         config.llm.model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
         config.llm.base_url = "https://api.deepseek.com"
+    elif os.getenv("TONGJI_API_KEY"):
+        config.llm.provider = "tongji"
+        config.llm.api_key = os.getenv("TONGJI_API_KEY")
+        config.llm.model = os.getenv("TONGJI_MODEL", "deepseek-r1")
+        config.llm.base_url = "https://llmapi.tongji.edu.cn/v1"
     elif os.getenv("OPENAI_API_KEY"):
         config.llm.api_key = os.getenv("OPENAI_API_KEY")
     if os.getenv("LLM_PROVIDER"):
@@ -203,6 +212,12 @@ def load_config() -> SystemConfig:
         if provider == "zhipu":
             config.llm.base_url = "https://open.bigmodel.cn/api/paas/v4/"
             config.llm.api_key = os.getenv("ZHIPU_API_KEY") or config.llm.api_key
+        elif provider == "modelscope":
+            config.llm.base_url = "https://api-inference.modelscope.cn/v1"
+            config.llm.api_key = os.getenv("MODELSCOPE_API_KEY") or config.llm.api_key
+        elif provider == "tongji":
+            config.llm.base_url = "https://llmapi.tongji.edu.cn/v1"
+            config.llm.api_key = os.getenv("TONGJI_API_KEY") or config.llm.api_key
     if os.getenv("LLM_MODEL"):
         config.llm.model = os.getenv("LLM_MODEL")
     if os.getenv("LLM_BASE_URL"):
@@ -233,7 +248,7 @@ def load_config() -> SystemConfig:
     if os.getenv("DB_POOL_MAX"):
         config.database.pool_max_size = int(os.getenv("DB_POOL_MAX", "10"))
 
-    # 文件存储配置（支持 Azure Blob）
+    # 文件存储配置（支持 Azure Blob / Supabase）
     if os.getenv("STORAGE_PROVIDER"):
         config.storage.provider = os.getenv("STORAGE_PROVIDER", "local").strip()
     if os.getenv("STORAGE_ENABLED"):
@@ -250,6 +265,18 @@ def load_config() -> SystemConfig:
     if config.storage.azure_connection_string and config.storage.provider == "local":
         config.storage.enabled = True
         config.storage.provider = "azure_blob"
+    # Supabase Storage 配置
+    if os.getenv("SUPABASE_URL"):
+        config.storage.supabase_url = os.getenv("SUPABASE_URL", "").strip()
+    if os.getenv("SUPABASE_SERVICE_KEY"):
+        config.storage.supabase_service_key = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+    if os.getenv("SUPABASE_STORAGE_BUCKET"):
+        config.storage.supabase_bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "document").strip()
+    if os.getenv("SUPABASE_STORAGE_PREFIX"):
+        config.storage.supabase_storage_prefix = os.getenv("SUPABASE_STORAGE_PREFIX", "sessions").strip()
+    if config.storage.supabase_url and config.storage.supabase_service_key and config.storage.provider in ("supabase", "supabase_storage"):
+        config.storage.enabled = True
+        config.storage.provider = "supabase"
 
     if os.getenv("AUTH_SECRET_KEY"):
         config.auth.secret_key = os.getenv("AUTH_SECRET_KEY", "change-me-in-production")

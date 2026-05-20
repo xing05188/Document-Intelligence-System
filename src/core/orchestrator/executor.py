@@ -11,7 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from config import SystemConfig, get_config
-from core.storage import build_blob_name, upload_file_to_storage
+from core.storage import (
+    build_blob_name,
+    get_storage_prefix,
+    upload_file_to_storage,
+)
 from utils.logger import get_logger
 from core.orchestrator.task_spec import FileInfo, TaskSpec
 
@@ -324,16 +328,17 @@ class TaskExecutor:
                 )
 
         blob_name = None
-        if self.config.storage.enabled and self.config.storage.provider == "azure_blob":
+        if self.config.storage.enabled:
             try:
+                blob_prefix = get_storage_prefix(self.config) or "workflows"
                 blob_name = upload_file_to_storage(
                     out_path,
                     config=self.config,
-                    blob_name=build_blob_name(execution_id, out_path.name, prefix=self.config.storage.azure_blob_prefix or "workflows"),
+                    blob_name=build_blob_name(execution_id, out_path.name, prefix=blob_prefix),
                     content_type=mime_type,
                 )
             except Exception as exc:
-                self.logger.warning(f"上传工作流产物到 Blob 失败: {exc}")
+                self.logger.warning(f"上传工作流产物到存储失败: {exc}")
 
         return {
             "success": True,

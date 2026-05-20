@@ -131,6 +131,10 @@ class LLMService:
             return "https://api.deepseek.com/v1"
         elif provider == "zhipu":
             return "https://open.bigmodel.cn/api/paas/v4/"
+        elif provider == "modelscope":
+            return "https://api-inference.modelscope.cn/v1"
+        elif provider == "tongji":
+            return "https://llmapi.tongji.edu.cn/v1"
         elif provider == "openai":
             return "https://api.openai.com/v1"
         elif provider == "anthropic":

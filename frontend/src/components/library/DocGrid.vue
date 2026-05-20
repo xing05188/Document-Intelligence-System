@@ -593,7 +593,7 @@ function getFileIcon(extension) {
 .doc-checkbox {
   position: absolute;
   top: 12px;
-  right: 12px;
+  left: 12px;
   width: 22px;
   height: 22px;
   background: var(--bg-tertiary);

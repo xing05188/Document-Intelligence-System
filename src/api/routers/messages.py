@@ -91,7 +91,7 @@ def _resolve_file_reference(file_info: Dict[str, Any], cfg, session_id: str, kin
     if cache_path.exists():
         return str(cache_path)
 
-    if cfg.storage.enabled and cfg.storage.provider == "azure_blob":
+    if cfg.storage.enabled:
         try:
             return str(download_file_to_local(storage_key, cache_path, config=cfg))
         except Exception:

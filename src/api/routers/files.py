@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from config import load_config
-from core.storage import build_blob_name, delete_file_from_storage, download_file_to_local, upload_stream_to_storage
+from core.storage import build_blob_name, delete_file_from_storage, download_file_to_local, get_storage_backend, get_storage_prefix, upload_stream_to_storage
 from db.auth_repository import resolve_user_from_authorization
 from db.session_repository import (
     add_session_file,
@@ -164,15 +164,16 @@ async def upload_file(
     safe_name = f"{timestamp}_{file_name}"
     file_size = 0
     storage_key = None
-    if cfg.storage.enabled and cfg.storage.provider == "azure_blob":
+    if cfg.storage.enabled:
+        blob_prefix = get_storage_prefix(cfg)
         storage_key = upload_stream_to_storage(
             file.file,
             config=cfg,
-            blob_name=build_blob_name(session_id, safe_name, prefix=cfg.storage.azure_blob_prefix),
+            blob_name=build_blob_name(session_id, safe_name, prefix=blob_prefix),
             content_type=file.content_type,
         )
         if not storage_key:
-            raise HTTPException(status_code=502, detail="Azure Blob 上传失败")
+            raise HTTPException(status_code=502, detail="云存储上传失败")
         try:
             file.file.seek(0, 2)
             file_size = file.file.tell()
@@ -287,7 +288,7 @@ async def download_file(session_id: str, file_id: int, authorization: Optional[s
     storage_key = getattr(file_info, "storage_key", None) or ""
     file_path = None
 
-    if storage_key and cfg.storage.enabled and cfg.storage.provider == "azure_blob":
+    if storage_key and cfg.storage.enabled:
         cache_path = Path(cfg.temp_dir) / "azure_blob_cache" / storage_key
         try:
             file_path = download_file_to_local(storage_key, cache_path, config=cfg)
@@ -318,15 +319,14 @@ download_router = APIRouter(prefix="/api/files", tags=["文件下载"])
 
 @download_router.get("/download-by-blob")
 async def download_by_blob(blob_name: str, authorization: Optional[str] = Header(default=None)):
-    """从 Azure Blob Storage 下载文件。"""
+    """从存储下载文件。"""
     cfg = load_config()
     current_user = _resolve_current_user(authorization, cfg)
-    if not cfg.storage.enabled or cfg.storage.provider != "azure_blob":
-        raise HTTPException(status_code=503, detail="Blob 存储未启用")
+    if not cfg.storage.enabled:
+        raise HTTPException(status_code=503, detail="云存储未启用")
 
-    # 允许 workflows / sessions 前缀的 blob
-    allowed_prefixes = (cfg.storage.azure_blob_prefix or "sessions").split(",")
-    safe_prefixes = tuple(p.strip() for p in allowed_prefixes) + ("sessions", "workflows")
+    safe_bucket = (cfg.storage.azure_blob_prefix or "sessions").split(",")
+    safe_prefixes = tuple(p.strip() for p in safe_bucket) + ("sessions", "workflows")
     if not any(blob_name.startswith(sp) for sp in safe_prefixes):
         raise HTTPException(status_code=403, detail="不允许访问该 Blob")
 
@@ -358,7 +358,7 @@ async def download_by_path(path: str, authorization: Optional[str] = Header(defa
     if not any(file_path.is_relative_to(root) for root in allowed_roots):
         raise HTTPException(status_code=403, detail="不允许访问该路径")
 
-    if not file_path.exists() and cfg.storage.enabled and cfg.storage.provider == "azure_blob":
+    if not file_path.exists() and cfg.storage.enabled:
         try:
             cache_path = Path(cfg.temp_dir) / "azure_blob_cache" / path
             file_path = download_file_to_local(path, cache_path, config=cfg)
@@ -399,15 +399,16 @@ async def upload_temp_file(
     safe_name = f"{timestamp}_{file_name}"
     file_size = 0
 
-    if cfg.storage.enabled and cfg.storage.provider == "azure_blob":
+    if cfg.storage.enabled:
+        blob_prefix = get_storage_prefix(cfg)
         storage_key = upload_stream_to_storage(
             file.file,
             config=cfg,
-            blob_name=build_blob_name(session_id, safe_name, prefix=cfg.storage.azure_blob_prefix),
+            blob_name=build_blob_name(session_id, safe_name, prefix=blob_prefix),
             content_type=file.content_type,
         )
         if not storage_key:
-            raise HTTPException(status_code=502, detail="Azure Blob 上传失败")
+            raise HTTPException(status_code=502, detail="云存储上传失败")
         try:
             file.file.seek(0, 2)
             file_size = file.file.tell()
