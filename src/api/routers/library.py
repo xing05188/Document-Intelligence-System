@@ -366,6 +366,76 @@ async def delete_docs_batch(
     return {"results": results}
 
 
+class SaveGeneratedRequest(BaseModel):
+    """保存生成文件到文档库请求"""
+    space_id: str
+    file_path: str
+    file_name: str
+
+
+@router.post("/save-generated")
+async def save_generated_file(
+    body: SaveGeneratedRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """将生成的文件保存到文档库"""
+    cfg = load_config()
+    user = _resolve_user(authorization, cfg)
+
+    # 验证空间是否存在
+    space = get_library_space_by_id(body.space_id, config=cfg, user_id=user.id if user else None)
+    if not space:
+        raise HTTPException(status_code=404, detail="空间不存在")
+
+    # 解析文件路径
+    src_path = Path(body.file_path)
+    if not src_path.exists():
+        # 尝试相对于工作目录
+        src_path = Path("workspace") / body.file_path
+    if not src_path.exists():
+        raise HTTPException(status_code=404, detail="源文件不存在")
+
+    file_name = body.file_name or src_path.name
+    file_size = src_path.stat().st_size
+
+    # 读取文件内容
+    content = src_path.read_bytes()
+    file_hash = hashlib.md5(content).hexdigest()
+
+    storage_key = None
+    if cfg.storage.enabled:
+        blob_prefix = get_storage_prefix(cfg)
+        ext = Path(file_name).suffix or ""
+        unique_name = f"{file_hash}_{uuid4().hex}{ext}"
+        blob_name = build_blob_name(body.space_id, unique_name, prefix=blob_prefix)
+        storage_key = upload_stream_to_storage(
+            BytesIO(content),
+            config=cfg,
+            blob_name=blob_name,
+            content_type="application/octet-stream",
+        )
+        if not storage_key:
+            raise HTTPException(status_code=502, detail="云存储上传失败")
+    else:
+        safe_name = f"{file_hash}_{file_name}"
+        file_path = LIBRARY_UPLOAD_DIR / body.space_id / safe_name
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(content)
+        storage_key = str(file_path)
+
+    doc = add_library_doc(
+        space_id=body.space_id,
+        file_name=file_name,
+        file_size=file_size,
+        config=cfg,
+        user_id=user.id if user else None,
+        mime_type="application/octet-stream",
+        storage_key=storage_key,
+        blob_url=storage_key,
+    )
+    return _doc_to_dict(doc)
+
+
 @router.get("/docs/{doc_id}/download")
 async def download_doc(
     doc_id: str,

@@ -6,6 +6,7 @@ import fileApi from '../api/files'
 import agentApi from '../api/agents'
 import { getAccessToken } from '../api/auth'
 import { useFileStore } from './fileStore'
+import { useSSE } from '../composables/useSSE'
 
 const SESSIONS_KEY = 'doc_sessions'
 const MESSAGES_KEY = 'doc_messages_'
@@ -218,20 +219,18 @@ export const useSessionStore = defineStore('session', () => {
   const isUploadingFiles = ref(false)
   const uploadProgress = ref('')
   const sidebarCollapsed = ref(false)
-  const ws = ref(null)
-  const wsConnecting = ref(false)
-  const wsSessionId = ref(null) // 追踪当前 WebSocket 连接对应的 session_id
+
+  // SSE 流式连接
+  const sse = useSSE()
+  const sseSessionId = ref(null)
 
   // 进度条相关（混合模式/实体提取/表格填表）
   const progressValue = ref(0)
   const progressMessage = ref('')
   const showProgressBar = ref(false)
 
-  // WebSocket 回调（用于混合模式多任务处理）
-  let pendingResolve = null
-  let pendingResultData = null
-  let loadingMsgId = null // 当前 loading 消息的 ID
-  let isSending = false // 标记是否正在发送消息
+  // SSE 任务完成回调（混合模式用于追踪单个子任务完成）
+  let _sseDoneCallback = null
 
   // 模式相关
   const currentMode = ref('default_conversation')
@@ -470,8 +469,8 @@ export const useSessionStore = defineStore('session', () => {
       // 加载新会话的文件列表（为空）
       loadFiles(res.session_id).catch(console.error)
       saveSessionsCache(sessions.value, res.session_id)
-      // 在真正的 session_id 确定后再连接 WebSocket
-      connectWebSocket()
+      // 在真正的 session_id 确定后再连接 SSE
+      connectSSE()
     } catch (e) {
       console.error('创建会话失败:', e)
       sessions.value = sessions.value.filter(s => s.session_id !== tempId)
@@ -479,35 +478,43 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  let _switchTimer = null
   async function selectSession(sessionId) {
     if (currentSessionId.value === sessionId) return
 
-    const prevWs = ws.value
-    if (prevWs) {
-      prevWs.onclose = null
-      prevWs.onerror = null
-      prevWs.close()
-    }
+    // 防抖：快速切换时取消上一次，只执行最后一次
+    if (_switchTimer) clearTimeout(_switchTimer)
 
-    currentSessionId.value = sessionId
+    _switchTimer = setTimeout(async () => {
+      _switchTimer = null
+      if (currentSessionId.value === sessionId) return
+      await _doSelectSession(sessionId)
+    }, 30)
+  }
 
-    // 切换到该会话保存的模式（如果没有则使用默认模式）
+  async function _doSelectSession(sessionId) {
+    if (currentSessionId.value === sessionId) return
+
+    disconnectSSE()
+
     const sess = sessions.value.find(s => s.session_id === sessionId)
-    currentMode.value = sess?.current_mode || 'default_conversation'
+    const newMode = sess?.current_mode || 'default_conversation'
 
-    messages.value = []
-    await new Promise(resolve => setTimeout(resolve, 100))
-    connectWebSocket()
-
+    // 先从缓存加载，避免白屏
     const cachedMsgs = loadMessagesCache(sessionId)
     if (cachedMsgs && cachedMsgs.messages?.length > 0) {
       messages.value = cachedMsgs.messages
+    } else {
+      messages.value = []
     }
+
+    currentSessionId.value = sessionId
+    currentMode.value = newMode
+
+    connectSSE()
+
+    // 后台异步加载最新消息，不阻塞界面
     loadMessages(sessionId).catch(console.error)
-
-    // 从数据库加载文件列表
-    loadFiles(sessionId).catch(console.error)
-
     saveSessionsCache(sessions.value, sessionId)
   }
 
@@ -523,24 +530,22 @@ export const useSessionStore = defineStore('session', () => {
 
     if (wasCurrentSession) {
       if (nextSession) {
-        currentSessionId.value = nextSession.session_id
-        messages.value = []
-        const wsPrev = ws.value
-        if (wsPrev) {
-          wsPrev.onclose = null
-          wsPrev.onerror = null
-          wsPrev.close()
-        }
-        connectWebSocket()
-        const cachedMsgs = loadMessagesCache(nextSession.session_id)
+        const nextId = nextSession.session_id
+        // 先从缓存恢复，避免白屏
+        const cachedMsgs = loadMessagesCache(nextId)
         if (cachedMsgs?.messages?.length > 0) {
           messages.value = cachedMsgs.messages
+        } else {
+          messages.value = []
         }
-        loadMessages(nextSession.session_id).catch(console.error)
+        currentSessionId.value = nextId
+        disconnectSSE()
+        connectSSE()
+        loadMessages(nextId).catch(console.error)
       } else {
-        currentSessionId.value = null
         messages.value = []
-        disconnectWebSocket()
+        currentSessionId.value = null
+        disconnectSSE()
       }
     }
 
@@ -567,8 +572,18 @@ export const useSessionStore = defineStore('session', () => {
   async function loadMessages(sessionId) {
     try {
       const res = await messageApi.list(sessionId)
+      // 会话守卫：如果当前会话已切换，丢弃本次结果
+      if (currentSessionId.value !== sessionId) return
       const msgs = (Array.isArray(res) ? res : []).map(normalizeMessageForResultDisplay)
+      // 再次检查（防止 async 间隙被切换）
+      if (currentSessionId.value !== sessionId) return
       if (msgs.length > 0 || currentSessionId.value === sessionId) {
+        // 浅比较：避免数据没变化时触发重新渲染
+        const cur = messages.value
+        if (msgs.length === cur.length && msgs.every((m, i) => m.id === cur[i]?.id && m.content === cur[i]?.content)) {
+          if (msgs.length > 0) saveMessagesCache(sessionId, msgs)
+          return
+        }
         messages.value = msgs
         saveMessagesCache(sessionId, msgs)
       }
@@ -577,373 +592,187 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
-  async function connectWebSocket(targetSessionId = null) {
-    // 如果没有指定 sessionId，使用当前的
+  async function connectSSE(targetSessionId = null) {
     const sessionId = targetSessionId || currentSessionId.value
-    
-    // 跳过临时 ID（会话尚未在服务器上创建）
     if (!sessionId || sessionId.startsWith('temp_')) {
-      console.log('[connectWebSocket] 跳过临时 session_id:', sessionId)
+      console.log('[connectSSE] 跳过临时 session_id:', sessionId)
       return
     }
-
-    // 如果有连接正在进行，等待它完成后再继续
-    if (wsConnecting.value) {
-      console.log('[connectWebSocket] 等待现有连接完成...')
-      const result = await waitForWebSocketOpen(3000)
-      // 等待后再次检查
-      if (ws.value && wsSessionId.value === sessionId && ws.value.readyState === WebSocket.OPEN) {
-        console.log('[connectWebSocket] 等待后连接已就绪')
-        return
-      }
-      // 如果等待后连接已关闭或失败，重置状态
-      if (!ws.value || ws.value.readyState === WebSocket.CLOSED) {
-        console.log('[connectWebSocket] 等待后发现连接已关闭，重置状态')
-        wsConnecting.value = false
-        ws.value = null
-        wsSessionId.value = null
-      }
-    }
-
-    // 如果已有活跃连接且 session_id 相同，不再创建新连接
-    if (ws.value && wsSessionId.value === sessionId) {
-      if (ws.value.readyState === WebSocket.OPEN) {
-        console.log('[connectWebSocket] 已存在相同 session_id 的 OPEN 连接，保持不变')
-        return
-      }
-      if (ws.value.readyState === WebSocket.CONNECTING) {
-        console.log('[connectWebSocket] 相同 session_id 正在连接中，等待...')
-        await waitForWebSocketOpen(5000)
-        return
-      }
-      // 连接已关闭或失败
-      if (ws.value.readyState === WebSocket.CLOSED) {
-        console.log('[connectWebSocket] 旧连接已关闭')
-        ws.value = null
-        wsSessionId.value = null
-      }
-    }
-
-    // 已有可用连接时直接复用，避免重复 close/open 造成频繁重连。
-    if (ws.value && (ws.value.readyState === WebSocket.OPEN || ws.value.readyState === WebSocket.CONNECTING)) {
+    if (sseSessionId.value === sessionId) {
+      console.log('[connectSSE] 已连接相同 session, 跳过')
       return
     }
+    sseSessionId.value = sessionId
+    const url = messageApi.streamUrl(sessionId)
+    console.log('[connectSSE] 连接 SSE, sessionId:', sessionId)
 
-    if (wsConnecting.value) return
+    sse.connect(url, {
+      onOpen: () => {
+        console.log('[SSE] 连接已建立, sessionId:', sessionId)
+      },
+      onMessage: (data) => {
+        handleSSEMessage(data)
+      },
+      onError: () => {
+        console.warn('[SSE] 连接错误, sessionId:', sseSessionId.value)
+        sseSessionId.value = null
+      },
+    })
+  }
 
-    // 如果有现有连接，先关闭
-    if (ws.value) {
-      console.log('[connectWebSocket] 关闭旧连接')
-      ws.value.onclose = null
-      ws.value.onerror = null
-      try {
-        ws.value.close()
-      } catch (e) {
-        console.warn('[connectWebSocket] 关闭旧连接失败:', e)
+  function disconnectSSE() {
+    sse.disconnect()
+    sseSessionId.value = null
+  }
+
+  function handleSSEMessage(data) {
+    console.log('[SSE onmessage] 收到消息:', data)
+    if (data.type === 'start') {
+      console.log('[SSE] type=start, 收到开始信号')
+      isStreaming.value = true
+      const isEntityOrTable = data.result_type === 'entity_extraction' ||
+                             data.result_type === 'table_filling' ||
+                             data.mode === 'entity_extraction' ||
+                             data.mode === 'table_filling'
+      if (isEntityOrTable) {
+        showProgressBar.value = true
+        progressValue.value = 0
+        progressMessage.value = data.result_type === 'table_filling' || data.mode === 'table_filling'
+          ? '开始筛选数据...'
+          : '开始提取...'
       }
-      ws.value = null
-      wsSessionId.value = null
-    }
-
-    isStreaming.value = false
-    wsConnecting.value = true
-    wsSessionId.value = sessionId
-    console.log('[connectWebSocket] 创建新连接, session_id:', wsSessionId.value)
-
-    ws.value = messageApi.connect(sessionId)
-
-    ws.value.onmessage = (event) => {
-      console.log('[WebSocket onmessage] 收到消息:', event.data)
-      const data = JSON.parse(event.data)
-      console.log('[WebSocket onmessage] 解析后:', data)
-      if (data.type === 'start') {
-        console.log('[WebSocket onmessage] type=start, 收到开始信号')
-        isStreaming.value = true
-        // 实体提取/表格填表/混合模式显示进度条
-        const isEntityOrTable = data.result_type === 'entity_extraction' ||
-                               data.result_type === 'table_filling' ||
-                               data.mode === 'entity_extraction' ||
-                               data.mode === 'table_filling'
-        console.log('[WebSocket onmessage] isEntityOrTable:', isEntityOrTable, 'result_type:', data.result_type, 'mode:', data.mode)
-        if (isEntityOrTable) {
-          showProgressBar.value = true
-          progressValue.value = 0
-          progressMessage.value = data.result_type === 'table_filling' || data.mode === 'table_filling'
-            ? '开始筛选数据...'
-            : '开始提取...'
-        }
-      } else if (data.type === 'progress') {
-        console.log('[WebSocket onmessage] type=progress:', data.progress, data.message)
-        progressValue.value = data.progress
-        progressMessage.value = data.message
-      } else if (data.type === 'chunk') {
-        console.log('[WebSocket onmessage] type=chunk, result_type:', data.result_type, 'content长度:', data.content?.length)
-        isStreaming.value = false
-        // 删除 loading 消息（如果存在）
-        if (loadingMsgId !== null) {
-          const idx = messages.value.findIndex(m => m.id === loadingMsgId)
-          if (idx > -1) {
-            messages.value.splice(idx, 1)
-          }
-          loadingMsgId = null
-        }
-        // 实体提取结果处理
-        if (data.result_type === 'entity_extraction') {
-          try {
-            const parsed = JSON.parse(data.content)
-            const entities = Array.isArray(parsed?.entities) ? parsed.entities : []
-            const count = entities.length
-            const summary = `实体提取完成，共提取 ${count} 条数据`
-            const lastMsg = messages.value[messages.value.length - 1]
-            if (lastMsg && lastMsg.role === 'assistant') {
-              lastMsg.content = summary
-              lastMsg.entitiesData = entities
-            } else {
-              messages.value.push({
-                id: createMessageId('assistant'),
-                role: 'assistant',
-                content: summary,
-                created_at: new Date().toISOString(),
-                entitiesData: entities,
-              })
-            }
-            pendingResultData = { extractionData: parsed, entities }
-            console.log('[WebSocket onmessage] 实体提取结果解析成功, count:', count, 'keys:', Object.keys(parsed))
-          } catch (e) {
-            console.error('[WebSocket onmessage] 解析实体提取结果失败:', e)
-          }
-        } else if (data.result_type === 'table_filling') {
-          try {
-            let parsed = null
-            if (typeof data.content === 'string') {
-              parsed = JSON.parse(data.content)
-            } else if (data.content && typeof data.content === 'object') {
-              parsed = data.content
-            }
-            if (!parsed || typeof parsed !== 'object') {
-              throw new Error('table_filling chunk 内容不是有效对象')
-            }
-            console.log('[WebSocket onmessage] table_filling parsed, keys:', Object.keys(parsed), 'generated_files:', parsed.generated_files)
-            const normalizedChunkFiles = normalizeGeneratedFiles(
-              parsed.generated_files || parsed.generatedFiles || parsed.output_files
-            )
-            if (!Array.isArray(parsed.generated_files) || parsed.generated_files.length === 0) {
-              const fallbackFiles = fallbackGeneratedFilesFromTableData(parsed)
-              if (normalizedChunkFiles.length > 0) {
-                parsed.generated_files = normalizedChunkFiles
-              } else if (fallbackFiles.length > 0) {
-                parsed.generated_files = fallbackFiles
-              }
-            }
-            const lastMsg = messages.value[messages.value.length - 1]
-            if (lastMsg && lastMsg.role === 'assistant') {
-              lastMsg.tableFillingData = parsed
-            } else {
-              messages.value.push({
-                id: createMessageId('assistant'),
-                role: 'assistant',
-                content: parsed.message || '',
-                created_at: new Date().toISOString(),
-                tableFillingData: parsed,
-              })
-            }
-            pendingResultData = { tableFillingData: parsed }
-            console.log('[WebSocket onmessage] table_filling stored, msg count:', messages.value.length, 'lastMsg.tableFillingData:', !!messages.value[messages.value.length - 1]?.tableFillingData)
-          } catch (e) {
-            console.error('[WebSocket onmessage] 解析表格填表结果失败:', e)
-          }
-        } else {
-          // 普通流式文本
+    } else if (data.type === 'progress') {
+      console.log('[SSE] type=progress:', data.progress, data.message)
+      progressValue.value = data.progress
+      progressMessage.value = data.message
+    } else if (data.type === 'chunk') {
+      console.log('[SSE] type=chunk, result_type:', data.result_type, 'content长度:', data.content?.length)
+      isStreaming.value = false
+      if (data.result_type === 'entity_extraction') {
+        try {
+          const parsed = JSON.parse(data.content)
+          const entities = Array.isArray(parsed?.entities) ? parsed.entities : []
+          const count = entities.length
+          const summary = `实体提取完成，共提取 ${count} 条数据`
           const lastMsg = messages.value[messages.value.length - 1]
           if (lastMsg && lastMsg.role === 'assistant') {
-            lastMsg.content += data.content
+            lastMsg.content = summary
+            lastMsg.entitiesData = entities
           } else {
             messages.value.push({
               id: createMessageId('assistant'),
               role: 'assistant',
-              content: data.content,
+              content: summary,
               created_at: new Date().toISOString(),
+              entitiesData: entities,
             })
           }
+        } catch (e) {
+          console.error('[SSE] 解析实体提取结果失败:', e)
         }
-      } else if (data.type === 'done') {
-        console.log('[WebSocket onmessage] type=done, pendingResolve:', !!pendingResolve, 'generated_files:', data.generated_files)
-        isStreaming.value = false
-        isSending = false
-        showProgressBar.value = false
-        progressValue.value = 100
-        progressMessage.value = '处理完成'
-        const normalizedDoneFiles = normalizeGeneratedFiles(
-          data.generated_files || data.generatedFiles || data.output_files
-        )
-        const pendingTableData = pendingResultData?.tableFillingData
-        const pendingTableFiles = normalizeGeneratedFiles(
-          pendingTableData?.generated_files || pendingTableData?.generatedFiles
-        )
-        const pendingFallbackFiles = fallbackGeneratedFilesFromTableData(pendingTableData)
-        const finalGeneratedFiles = normalizedDoneFiles.length > 0
-          ? normalizedDoneFiles
-          : (pendingTableFiles.length > 0 ? pendingTableFiles : pendingFallbackFiles)
-        // 把 generated_files 存入最后一条助手消息
-        if (finalGeneratedFiles.length > 0) {
-          let lastMsg = messages.value[messages.value.length - 1]
-          if (!lastMsg || lastMsg.role !== 'assistant') {
-            lastMsg = {
+      } else if (data.result_type === 'table_filling') {
+        try {
+          let parsed = null
+          if (typeof data.content === 'string') {
+            parsed = JSON.parse(data.content)
+          } else if (data.content && typeof data.content === 'object') {
+            parsed = data.content
+          }
+          if (!parsed || typeof parsed !== 'object') {
+            throw new Error('table_filling chunk 内容不是有效对象')
+          }
+          const normalizedChunkFiles = normalizeGeneratedFiles(
+            parsed.generated_files || parsed.generatedFiles || parsed.output_files
+          )
+          if (!Array.isArray(parsed.generated_files) || parsed.generated_files.length === 0) {
+            const fallbackFiles = fallbackGeneratedFilesFromTableData(parsed)
+            if (normalizedChunkFiles.length > 0) {
+              parsed.generated_files = normalizedChunkFiles
+            } else if (fallbackFiles.length > 0) {
+              parsed.generated_files = fallbackFiles
+            }
+          }
+          const lastMsg = messages.value[messages.value.length - 1]
+          if (lastMsg && lastMsg.role === 'assistant') {
+            lastMsg.tableFillingData = parsed
+          } else {
+            messages.value.push({
               id: createMessageId('assistant'),
               role: 'assistant',
-              content: '',
+              content: parsed.message || '',
               created_at: new Date().toISOString(),
-            }
-            messages.value.push(lastMsg)
+              tableFillingData: parsed,
+            })
           }
-          lastMsg.generated_files = finalGeneratedFiles
-          // 表格填表 chunk 与 done 分开发字段时，合并进 tableFillingData 便于前端统一展示/下载
-          if (lastMsg.tableFillingData && typeof lastMsg.tableFillingData === 'object') {
-            lastMsg.tableFillingData.generated_files = finalGeneratedFiles
-          } else if (pendingTableData && typeof pendingTableData === 'object') {
-            lastMsg.tableFillingData = {
-              ...pendingTableData,
-              generated_files: finalGeneratedFiles,
-            }
-          }
-        }
-        if (currentSessionId.value) {
-          saveMessagesCache(currentSessionId.value, messages.value)
-          loadMessages(currentSessionId.value).catch(e =>
-            console.warn('[WebSocket done] 同步服务端消息失败:', e.message)
-          )
-        }
-        if (pendingResolve) {
-          const resolveData = { success: true, resp: pendingResultData }
-          if (finalGeneratedFiles.length > 0) resolveData.generated_files = finalGeneratedFiles
-          console.log('[WebSocket onmessage] 调用 pendingResolve', resolveData)
-          pendingResolve(resolveData)
-          pendingResolve = null
-          pendingResultData = null
-        }
-      } else if (data.type === 'error') {
-        const errorMsg = typeof data.message === 'string' ? data.message : JSON.stringify(data.message)
-        console.error('[WebSocket onmessage] type=error:', errorMsg, 'pendingResolve:', !!pendingResolve)
-        isStreaming.value = false
-        isSending = false
-        showProgressBar.value = false
-        if (pendingResolve) {
-          pendingResolve({ success: false, error: errorMsg })
-          pendingResolve = null
-          pendingResultData = null
+        } catch (e) {
+          console.error('[SSE] 解析表格填表结果失败:', e)
         }
       } else {
-        console.log('[WebSocket onmessage] 未知类型:', data.type)
+        // 普通流式文本
+        const lastMsg = messages.value[messages.value.length - 1]
+        if (lastMsg && lastMsg.role === 'assistant') {
+          lastMsg.content += data.content
+        } else {
+          messages.value.push({
+            id: createMessageId('assistant'),
+            role: 'assistant',
+            content: data.content,
+            created_at: new Date().toISOString(),
+          })
+        }
       }
-    }
-
-    ws.value.onclose = () => {
-      console.log('[WebSocket onclose] 连接已关闭, session_id:', wsSessionId.value, 'pendingResolve:', !!pendingResolve)
-      ws.value = null
-      wsSessionId.value = null
+    } else if (data.type === 'done') {
+      console.log('[SSE] type=done, generated_files:', data.generated_files)
       isStreaming.value = false
-      isSending = false
-      wsConnecting.value = false
-    }
-
-    ws.value.onerror = (err) => {
-      console.warn('[WebSocket onerror] 连接失败:', err, 'pendingResolve:', !!pendingResolve)
-      ws.value = null
-      wsSessionId.value = null
+      showProgressBar.value = false
+      progressValue.value = 100
+      progressMessage.value = '处理完成'
+      const normalizedDoneFiles = normalizeGeneratedFiles(
+        data.generated_files || data.generatedFiles || data.output_files
+      )
+      // 把 generated_files 存入最后一条助手消息
+      if (normalizedDoneFiles.length > 0) {
+        let lastMsg = messages.value[messages.value.length - 1]
+        if (!lastMsg || lastMsg.role !== 'assistant') {
+          lastMsg = {
+            id: createMessageId('assistant'),
+            role: 'assistant',
+            content: '',
+            created_at: new Date().toISOString(),
+          }
+          messages.value.push(lastMsg)
+        }
+        lastMsg.generated_files = normalizedDoneFiles
+        if (lastMsg.tableFillingData && typeof lastMsg.tableFillingData === 'object') {
+          lastMsg.tableFillingData.generated_files = normalizedDoneFiles
+        }
+      }
+      if (currentSessionId.value) {
+        saveMessagesCache(currentSessionId.value, messages.value)
+        loadMessages(currentSessionId.value).catch(e =>
+          console.warn('[SSE done] 同步服务端消息失败:', e.message)
+        )
+      }
+      if (_sseDoneCallback) {
+        _sseDoneCallback({ success: true, data })
+        _sseDoneCallback = null
+      }
+    } else if (data.type === 'error') {
+      const errorMsg = typeof data.message === 'string' ? data.message : JSON.stringify(data.message)
+      console.error('[SSE] type=error:', errorMsg)
       isStreaming.value = false
-      isSending = false
-      wsConnecting.value = false
-      if (pendingResolve) {
-        console.log('[WebSocket onerror] 通过 pendingResolve 报告失败')
-        pendingResolve({ success: false, error: 'WebSocket连接错误' })
-        pendingResolve = null
-        pendingResultData = null
+      showProgressBar.value = false
+      if (_sseDoneCallback) {
+        _sseDoneCallback({ success: false, error: errorMsg })
+        _sseDoneCallback = null
       }
+    } else {
+      console.log('[SSE] 未知类型:', data.type)
     }
-
-    ws.value.onopen = () => {
-      console.log('[WebSocket] onopen - 连接已建立, session_id:', wsSessionId.value)
-      wsConnecting.value = false
-    }
-
-    ws.value.send = new Proxy(ws.value.send, {
-      apply(target, thisArg, args) {
-        console.log('[WebSocket] 发送消息:', args[0] ? JSON.parse(args[0]) : args[0])
-        return target.apply(thisArg, args)
-      }
-    })
-  }
-
-  function disconnectWebSocket() {
-    if (ws.value) {
-      ws.value.close()
-      ws.value = null
-      wsSessionId.value = null
-    }
-    isStreaming.value = false
   }
 
   function toggleSidebar() {
     sidebarCollapsed.value = !sidebarCollapsed.value
-  }
-
-  async function waitForWebSocketOpen(maxMs = 8000) {
-    return new Promise((resolve) => {
-      const socket = ws.value
-      if (!socket) {
-        console.log('[waitForWebSocketOpen] 无 WebSocket 实例')
-        resolve(false)
-        return
-      }
-      console.log('[waitForWebSocketOpen] readyState:', socket.readyState, '(0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED)')
-      if (socket.readyState === WebSocket.OPEN) {
-        console.log('[waitForWebSocketOpen] 已 OPEN')
-        resolve(true)
-        return
-      }
-      if (socket.readyState === WebSocket.CLOSED) {
-        console.log('[waitForWebSocketOpen] 连接已关闭，重置状态')
-        wsConnecting.value = false
-        ws.value = null
-        wsSessionId.value = null
-        resolve(false)
-        return
-      }
-      if (socket.readyState === WebSocket.CONNECTING) {
-        console.log('[waitForWebSocketOpen] 等待 CONNECTING...')
-      }
-      const start = Date.now()
-      const t = setInterval(() => {
-        if (!ws.value || ws.value !== socket) {
-          console.log('[waitForWebSocketOpen] WebSocket 实例已变化')
-          clearInterval(t)
-          resolve(false)
-          return
-        }
-        console.log('[waitForWebSocketOpen] polling readyState:', socket.readyState)
-        if (socket.readyState === WebSocket.OPEN) {
-          clearInterval(t)
-          console.log('[waitForWebSocketOpen] OPEN!')
-          resolve(true)
-          return
-        }
-        if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
-          clearInterval(t)
-          console.log('[waitForWebSocketOpen] 已 CLOSED/CLOSING，重置状态')
-          wsConnecting.value = false
-          ws.value = null
-          wsSessionId.value = null
-          resolve(false)
-          return
-        }
-        if (Date.now() - start > maxMs) {
-          clearInterval(t)
-          console.log('[waitForWebSocketOpen] 超时')
-          resolve(false)
-          return
-        }
-      }, 50)
-    })
   }
 
   async function sendMessage(content, mode = 'default_conversation') {
@@ -979,6 +808,17 @@ export const useSessionStore = defineStore('session', () => {
 
     // 立即设置 loading 状态
     isStreaming.value = true
+
+    // 自动重命名：如果是新会话且标题仍为默认值，用第一条消息的前几个字作为标题
+    const sess = sessions.value.find(s => s.session_id === sessionId)
+    if (sess && (sess.title === '新会话' || sess.title === '新聊天')) {
+      const newTitle = content.trim().slice(0, 20) + (content.trim().length > 20 ? '...' : '')
+      if (newTitle) {
+        sess.title = newTitle
+        updateSessionTitle(sessionId, newTitle).catch(console.error)
+        saveSessionsCache(sessions.value, currentSessionId.value)
+      }
+    }
 
     // 需要上传的文件列表
     let allFiles = [...uploadedFiles]
@@ -1031,7 +871,7 @@ export const useSessionStore = defineStore('session', () => {
     console.log('[sendToBackend] 发送请求:', { sessionId, content, mode, files, template_files })
     
     // 添加助手 loading 消息（立即显示）
-    loadingMsgId = createMessageId('assistant-loading')
+    const loadingMsgId = createMessageId('assistant-loading')
     messages.value.push({
       id: loadingMsgId,
       role: 'assistant',
@@ -1040,50 +880,35 @@ export const useSessionStore = defineStore('session', () => {
       isLoading: true,
     })
     
-    // 检查 WebSocket 连接是否匹配当前 session
-    let canStream = await waitForWebSocketOpen(5000) // 等待最多 5 秒
-    const wsMatch = ws.value && wsSessionId.value === sessionId
-    
-    // 如果需要但没有匹配的 WebSocket 连接，建立新连接
-    if (!wsMatch || !canStream) {
-      console.log('[sendToBackend] 建立 WebSocket 连接, sessionId:', sessionId)
-      connectWebSocket(sessionId)
-      canStream = await waitForWebSocketOpen(5000)
+    // 确保 SSE 连接已建立
+    if (!sseSessionId.value || sseSessionId.value !== sessionId) {
+      console.log('[sendToBackend] 建立 SSE 连接, sessionId:', sessionId)
+      connectSSE(sessionId)
     }
     
-    if (wsMatch && canStream && ws.value && ws.value.readyState === WebSocket.OPEN && wsSessionId.value === sessionId) {
-      console.log('[sendToBackend] 通过 WebSocket 发送, session_id:', sessionId)
-      clearAllSelectedFiles()
-      isSending = true
-      ws.value.send(JSON.stringify({
+    clearAllSelectedFiles()
+    try {
+      // 通过 REST API 发送消息（stream: true 触发后端 SSE 推送）
+      await messageApi.send(sessionId, {
         content,
         mode,
         files,
         template_files,
-      }))
-    } else {
-      console.log('[sendToBackend] 通过 API 发送, wsMatch:', wsMatch, 'canStream:', canStream)
-      clearAllSelectedFiles()
-      try {
-        await messageApi.send(sessionId, {
-          content,
-          mode,
-          files,
-          template_files,
-        })
-        await loadMessages(sessionId)
-      } catch (e) {
-        console.error('[sendToBackend] 发送消息失败:', e)
-        messages.value.push({
-          id: createMessageId('assistant'),
-          role: 'assistant',
-          content: `发送失败: ${e.message}`,
-          created_at: new Date().toISOString(),
-        })
-      } finally {
-        isStreaming.value = false
-        isSending = false
-      }
+        stream: true,
+      })
+      // 发送成功后，后端通过 SSE 推送事件，handleSSEMessage 处理流式响应
+    } catch (e) {
+      console.error('[sendToBackend] 发送消息失败:', e)
+      // 移除 loading 消息
+      const loadIdx = messages.value.findIndex(m => m.id === loadingMsgId)
+      if (loadIdx > -1) messages.value.splice(loadIdx, 1)
+      messages.value.push({
+        id: createMessageId('assistant'),
+        role: 'assistant',
+        content: `发送失败: ${e.message}`,
+        created_at: new Date().toISOString(),
+      })
+      isStreaming.value = false
     }
   }
 
@@ -1154,31 +979,19 @@ export const useSessionStore = defineStore('session', () => {
     const docFiles = files.filter(f => getFileCategory(f.file_name) === 'document')
     const excelFiles = files.filter(f => getFileCategory(f.file_name) === 'excel')
 
-    // 无文件或纯文本：通过 WebSocket 流式发送
+    // 无文件或纯文本：通过 SSE 流式发送
     if (docFiles.length === 0 && excelFiles.length === 0) {
-      const canStream = await waitForWebSocketOpen()
-      if (ws.value && ws.value.readyState === WebSocket.OPEN && canStream) {
-        isStreaming.value = true
-        clearAllSelectedFiles()
-        ws.value.send(JSON.stringify({
+      clearAllSelectedFiles()
+      try {
+        await messageApi.send(currentSessionId.value, {
           content: content.trim(),
           mode: 'mixed',
-          files: files,
-          template_files: template_files,
-        }))
-      } else {
-        // WebSocket 不可用，fallback 到 REST API
-        try {
-          await messageApi.send(currentSessionId.value, {
-            content: content.trim(),
-            mode: 'mixed',
-            files: files,
-            template_files: template_files,
-          })
-          await loadMessages(currentSessionId.value)
-        } catch (e) {
-          console.error('发送消息失败:', e)
-        }
+          files,
+          template_files,
+          stream: true,
+        })
+      } catch (e) {
+        console.error('发送消息失败:', e)
       }
       return
     }
@@ -1214,93 +1027,40 @@ export const useSessionStore = defineStore('session', () => {
         isProgressMessage: true,
       })
 
-      // 等待 WebSocket 连接
-      const canStream = await waitForWebSocketOpen()
-      if (!canStream || !ws.value || ws.value.readyState !== WebSocket.OPEN) {
-        messages.value.push({
-          id: createMessageId('assistant'),
-          role: 'assistant',
-          content: 'WebSocket 连接失败，请重试',
-          created_at: new Date().toISOString(),
+      // 通过 POST + SSE 流式发送任务，等待 SSE done 事件后继续下一个
+      try {
+        const taskPromise = new Promise((resolve) => {
+          _sseDoneCallback = resolve
         })
-        results.push({ task, success: false })
-        continue
-      }
 
-      // 发送任务并等待结果
-      console.log(`[混合模式] 任务 ${i + 1}/${taskList.length} - 发送前 ws.readyState:`, ws.value?.readyState)
-      const result = await new Promise((resolve) => {
-        pendingResolve = resolve
-        try {
-          const msg = JSON.stringify({
-            content: content.trim(),
-            mode: task.mode,
-            files: [{ ...task.file, is_selected: true }],
-            template_files: template_files,
-          })
-          console.log(`[混合模式] 任务 ${i + 1}/${taskList.length} - 发送消息:`, JSON.parse(msg))
-          ws.value.send(msg)
-          console.log(`[混合模式] 任务 ${i + 1}/${taskList.length} - 发送完成，等待结果...`)
-        } catch (e) {
-          console.error(`[混合模式] 任务 ${i + 1}/${taskList.length} - 发送失败:`, e)
-          pendingResolve = null
-          resolve({ success: false, error: e.message })
-        }
-      })
-      console.log(`[混合模式] 任务 ${i + 1}/${taskList.length} - 收到结果:`, result)
+        await messageApi.send(currentSessionId.value, {
+          content: content.trim(),
+          mode: task.mode,
+          files: [{ ...task.file, is_selected: true }],
+          template_files,
+          stream: true,
+        })
 
-      // WS 偶发丢字段/丢包时，从历史消息回补本次子任务结果
-      if (task.mode === 'table_filling') {
-        const hasLiveGenerated = normalizeGeneratedFiles(result?.generated_files).length > 0
-        const hasLiveTableData = !!(result?.resp?.tableFillingData && typeof result.resp.tableFillingData === 'object')
-        if (!hasLiveGenerated || !hasLiveTableData) {
-          try {
-            const hist = await messageApi.list(currentSessionId.value, { limit: 30, offset: 0 })
-            const normalizedHist = (Array.isArray(hist) ? hist : []).map(normalizeMessageForResultDisplay)
-            for (let h = normalizedHist.length - 1; h >= 0; h--) {
-              const m = normalizedHist[h]
-              if (m?.role !== 'assistant') continue
-              const modeFlag = m?.metadata?.mode || m?.mode
-              const tf = m?.tableFillingData
-              const gf = normalizeGeneratedFiles(m?.generated_files)
-              const looksLikeTableResult = !!tf || gf.length > 0
-              if ((modeFlag === 'table_filling' || looksLikeTableResult) && looksLikeTableResult) {
-                if (!result.resp || typeof result.resp !== 'object') result.resp = {}
-                if (tf && !result.resp.tableFillingData) result.resp.tableFillingData = tf
-                if (gf.length > 0 && normalizeGeneratedFiles(result.generated_files).length === 0) {
-                  result.generated_files = gf
-                }
-                break
-              }
-            }
-          } catch (e) {
-            console.warn('[混合模式] 历史消息回补失败:', e)
+        const result = await taskPromise
+        console.log(`[混合模式] 任务 ${i + 1}/${taskList.length} - 收到结果:`, result)
+
+        // 将子任务结果回填到对应进度消息
+        const progressMsg = findLatestMixedProgressMessage(messages.value, i, task.file?.file_name)
+        if (progressMsg) {
+          const taskGeneratedFiles = normalizeGeneratedFiles(result?.data?.generated_files)
+          if (taskGeneratedFiles.length > 0) {
+            progressMsg.generated_files = taskGeneratedFiles
           }
         }
-      }
 
-      // 将子任务结果回填到对应进度消息，避免因返回字段差异导致下载按钮不显示
-      const progressMsg = findLatestMixedProgressMessage(messages.value, i, task.file?.file_name)
-      if (progressMsg) {
-        const taskGeneratedFiles = normalizeGeneratedFiles(result?.generated_files)
-        if (taskGeneratedFiles.length > 0) {
-          progressMsg.generated_files = taskGeneratedFiles
-        }
-        const taskTableData = result?.resp?.tableFillingData
-        if (taskTableData && typeof taskTableData === 'object') {
-          const tableFiles = normalizeGeneratedFiles(taskTableData.generated_files)
-          const fallbackFiles = fallbackGeneratedFilesFromTableData(taskTableData)
-          progressMsg.tableFillingData = {
-            ...taskTableData,
-            generated_files: tableFiles.length > 0 ? tableFiles : fallbackFiles,
-          }
-        }
+        results.push({ task, ...result })
+      } catch (e) {
+        console.error(`[混合模式] 任务 ${i + 1}/${taskList.length} - 发送失败:`, e)
+        results.push({ task, success: false, error: e.message })
       }
-
-      results.push({ task, ...result })
     }
 
-    // 清空选中状态（注意：混合模式在每个任务完成后才清空，不是发送前清空）
+    // 清空选中状态
     clearAllSelectedFiles()
     currentMode.value = originalMode
 
@@ -1318,11 +1078,9 @@ export const useSessionStore = defineStore('session', () => {
     
     // 收集所有文件：从成功的任务中收集
     for (const r of successfulResults) {
-      // 从 r.generated_files 收集（WebSocket done消息中的文件）
-      const gf = normalizeGeneratedFiles(r?.generated_files)
+      const gf = normalizeGeneratedFiles(r?.data?.generated_files)
       if (gf.length > 0) mergedGeneratedFiles.push(...gf)
       
-      // 从 tableFillingData.generated_files 收集（表格填表的文件）
       const tf = r?.resp?.tableFillingData
       if (tf && typeof tf === 'object') {
         const tfGf = normalizeGeneratedFiles(tf.generated_files)
@@ -1330,7 +1088,7 @@ export const useSessionStore = defineStore('session', () => {
       }
     }
     
-    // 去重处理（防止同一文件被添加多次）
+    // 去重处理
     const uniqueFiles = []
     const seenPaths = new Set()
     for (const f of mergedGeneratedFiles) {
@@ -1343,8 +1101,8 @@ export const useSessionStore = defineStore('session', () => {
     // 收集表格填表的预览数据
     let tableFillingPreviewData = null
     for (const r of successfulResults) {
-      if (r?.task?.mode === 'table_filling' && r?.resp?.tableFillingData) {
-        const tf = r.resp.tableFillingData
+      if (r?.task?.mode === 'table_filling' && r?.data?.table_filling_data) {
+        const tf = r.data.table_filling_data
         if (tf && typeof tf === 'object') {
           tableFillingPreviewData = {
             previewData: tf.previewData || tf.filtered_rows || [],
@@ -1352,7 +1110,7 @@ export const useSessionStore = defineStore('session', () => {
             total_rows: tf.total_rows,
             success: tf.success,
           }
-          break  // 只取第一个表格填表结果
+          break
         }
       }
     }
@@ -1480,7 +1238,7 @@ export const useSessionStore = defineStore('session', () => {
     isInitializing.value = false
 
     if (currentSessionId.value) {
-      connectWebSocket()
+      connectSSE(currentSessionId.value)
       loadMessages(currentSessionId.value).catch(console.error)
     }
   }
@@ -1509,8 +1267,8 @@ export const useSessionStore = defineStore('session', () => {
     loadMessages,
     sendMessage,
     switchMode,
-    connectWebSocket,
-    disconnectWebSocket,
+    connectSSE,
+    disconnectSSE,
     toggleSidebar,
     sidebarCollapsed,
     formatTime,

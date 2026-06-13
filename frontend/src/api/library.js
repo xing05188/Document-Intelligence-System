@@ -57,4 +57,9 @@ export default {
     a.headers = { Authorization: token }
     a.click()
   },
+
+  /** 将生成的文件保存到文档库 */
+  saveGeneratedFile(spaceId, data) {
+    return client.post('/library/save-generated', { space_id: spaceId, ...data })
+  },
 }

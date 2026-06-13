@@ -95,8 +95,11 @@ class TaskSpec:
 
         if self.task_type == TaskType.DOCUMENT_EDITING:
             docx_files = self.get_source_by_type(FileType.DOCX)
-            if not docx_files:
-                return False, "文档编辑模式需要提供 Word 文档 (docx)"
+            md_files = self.get_source_by_type(FileType.MD)
+            txt_files = self.get_source_by_type(FileType.TXT)
+            xlsx_files = self.get_source_by_type(FileType.XLSX)
+            if not (docx_files or md_files or txt_files or xlsx_files):
+                return False, "文档编辑模式需要提供支持的文档 (docx/md/txt/xlsx)"
 
         elif self.task_type == TaskType.ENTITY_EXTRACTION:
             if not self.has_document():

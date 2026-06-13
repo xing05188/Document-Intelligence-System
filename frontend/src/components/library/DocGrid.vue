@@ -636,13 +636,8 @@ function getFileIcon(extension) {
   color: var(--text-muted);
   font-size: 18px;
   font-weight: 300;
-  opacity: 0;
   transition: all 0.2s;
   line-height: 1;
-}
-
-.doc-card:hover .doc-delete-btn {
-  opacity: 1;
 }
 
 .doc-delete-btn:hover {

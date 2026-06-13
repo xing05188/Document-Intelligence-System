@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from config import load_config
@@ -28,6 +29,46 @@ from service.agent_service import AgentService, get_selected_session_files_paylo
 router = APIRouter(prefix="/api/messages", tags=["消息管理"])
 
 
+# ============ SSE Event Bus ============
+
+class EventBus:
+    """内存事件总线，用于 SSE 推送。支持 session 级别发布/订阅。"""
+
+    def __init__(self):
+        self._queues: Dict[str, asyncio.Queue] = {}
+        self._lock = threading.Lock()
+
+    def _get_queue(self, session_id: str) -> asyncio.Queue:
+        with self._lock:
+            if session_id not in self._queues:
+                self._queues[session_id] = asyncio.Queue()
+            return self._queues[session_id]
+
+    async def publish(self, session_id: str, event: dict):
+        """发布事件到指定 session 的队列"""
+        await self._get_queue(session_id).put(event)
+
+    async def subscribe(self, session_id: str, timeout: float = 30.0):
+        """订阅指定 session 的事件。每次 await 返回一个事件，超时返回 keepalive。"""
+        queue = self._get_queue(session_id)
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=timeout)
+                yield event
+                if event.get("type") in ("done", "error"):
+                    break
+            except asyncio.TimeoutError:
+                yield {"type": "keepalive"}
+
+    def cleanup(self, session_id: str):
+        """清理 session 的队列"""
+        with self._lock:
+            self._queues.pop(session_id, None)
+
+
+event_bus = EventBus()
+
+
 class SendMessageRequest(BaseModel):
     content: str = Field(..., description="消息内容")
     mode: Optional[str] = Field(
@@ -43,6 +84,10 @@ class SendMessageRequest(BaseModel):
         default=None,
         description="随消息附带的模板文件",
     )
+    stream: bool = Field(
+        default=False,
+        description="是否使用 SSE 流式响应（true 时通过 SSE 推送事件）",
+    )
 
 
 class MessageResponse(BaseModel):
@@ -55,9 +100,12 @@ class MessageResponse(BaseModel):
 
 
 class SendMessageResponse(BaseModel):
-    message_id: int
-    content: str
-    created_at: str
+    message_id: Optional[int] = None
+    content: Optional[str] = None
+    created_at: Optional[str] = None
+    status: Optional[str] = None
+    session_id: Optional[str] = None
+    mode: Optional[str] = None
 
 
 def _resolve_current_user(authorization: Optional[str], cfg):
@@ -795,7 +843,37 @@ async def send_message(session_id: str, request: SendMessageRequest, authorizati
         f.id for f in get_session_files(session_id, config=cfg, user_id=current_user.id if current_user else None)
     }
 
-    # 调用 Agent 服务获取回复（必须与前端所选模式一致，否则恒走默认对话）
+    if request.stream:
+        # SSE 流式响应：在后台处理消息，通过 event_bus 推送事件
+        current_user_local = current_user
+        cfg_local = cfg
+
+        async def process_and_publish():
+            try:
+                await _process_streaming_chat(
+                    session_id=session_id,
+                    content=request.content,
+                    mode=effective_mode,
+                    files=db_data_files,
+                    template_files=db_template_files,
+                    cfg=cfg_local,
+                    current_user=current_user_local,
+                )
+            except Exception as e:
+                print(f"[SSE] 后台处理异常: {e}")
+                import traceback; traceback.print_exc()
+                await event_bus.publish(session_id, {"type": "error", "message": str(e)})
+
+        asyncio.create_task(process_and_publish())
+
+        return {"status": "streaming", "session_id": session_id, "mode": effective_mode}
+
+    # 非流式：走原有同步逻辑
+    before_file_ids = {
+        f.id for f in get_session_files(session_id, config=cfg, user_id=current_user.id if current_user else None)
+    }
+
+    # 调用 Agent 服务获取回复
     agent_service = AgentService()
     response = await agent_service.chat(
         session_id,
@@ -836,390 +914,153 @@ async def send_message(session_id: str, request: SendMessageRequest, authorizati
     )
 
 
-# ============ WebSocket 流式聊天 ============
+# ============ SSE 流式处理与端点 ============
 
-class ConnectionManager:
-    """WebSocket 连接管理器"""
-    
-    def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
-    
-    async def connect(self, websocket: WebSocket, session_id: str):
-        await websocket.accept()
-        self.active_connections[session_id] = websocket
-    
-    def disconnect(self, session_id: str):
-        if session_id in self.active_connections:
-            del self.active_connections[session_id]
-    
-    async def send_text(self, session_id: str, text: str):
-        if session_id in self.active_connections:
-            await self.active_connections[session_id].send_text(text)
-    
-    async def send_json(self, session_id: str, data: dict):
-        if session_id not in self.active_connections:
-            return
-        try:
-            await self.active_connections[session_id].send_json(data)
-        except Exception:
-            # WebSocket 已关闭，忽略发送失败
-            pass
+async def _process_streaming_chat(
+    session_id: str,
+    content: str,
+    mode: str,
+    files: List[Dict[str, Any]],
+    template_files: List[Dict[str, Any]],
+    cfg,
+    current_user,
+):
+    """处理流式聊天消息，将事件发布到 event_bus（替代 WebSocket 处理逻辑）"""
+    import queue as _queue_module
 
+    user_id = current_user.id if current_user else None
 
-manager = ConnectionManager()
+    # 用户消息已在 send_message 中保存，此处不再重复保存
 
+    # 发送开始信号
+    await event_bus.publish(session_id, {"type": "start", "mode": mode})
+    print(f"[SSE] 发送 start mode={mode} session_id={session_id}")
 
-@router.websocket("/ws/{session_id}")
-async def websocket_chat(websocket: WebSocket, session_id: str):
-    """
-    WebSocket 流式聊天（长连接模式）
-    前端连接后可持续发送消息，后端保持连接循环处理。
-    每次前端发送 JSON：{"content": "...", "mode": "...", "files": [...], "template_files": [...]}
-    后端流式返回：{"type": "chunk", "content": "..."} 或 {"type": "done", "content": "..."}
-    """
-    cfg = load_config()
-    current_user = None
-    authorization = websocket.headers.get("authorization") or websocket.query_params.get("token")
-    if authorization:
-        try:
-            current_user = resolve_user_from_authorization(authorization, cfg, required=True, allow_raw_token=True)
-        except PermissionError as exc:
-            await websocket.close(code=4401, reason=str(exc))
-            return
-    elif cfg.auth.require_auth:
-        await websocket.close(code=4401, reason="需要登录后访问")
-        return
+    before_file_ids = {
+        f.id for f in get_session_files(session_id, config=cfg, user_id=user_id)
+    }
 
-    print(f"[API] WS /api/messages/ws/{session_id} connected")
-    
-    # 检查会话是否存在
-    session = get_session_by_id(session_id, config=cfg, user_id=current_user.id if current_user else None)
-    if not session:
-        await websocket.close(code=4004, reason="会话不存在")
-        return
-    
-    await manager.connect(websocket, session_id)
-    print(f"[WS] 连接已建立 session_id={session_id}")
-    
-    try:
-        # 保持连接循环，持续处理消息
-        while True:
-            try:
-                # 等待接收消息（会阻塞在这里直到收到消息或连接关闭）
-                data = await websocket.receive_json()
-                print(f"[WS] 收到消息 session_id={session_id} mode={data.get('mode')} content={data.get('content','')[:50]}")
-            except Exception:
-                # 连接已关闭或出错，退出循环
-                break
-            
-            user_content = data.get("content", "")
-            # 显式 null/空串时回退到会话记录的模式，避免误走默认对话
-            raw_mode = data.get("mode")
-            mode = (raw_mode or session.current_mode or "default_conversation")
-            if isinstance(mode, str):
-                mode = mode.strip() or "default_conversation"
-            
-            # 优先使用前端传来的文件（和消息一起发送）
-            # 这样用户可以随时切换勾选，文件跟随消息
-            client_files = data.get("files") or []
-            client_templates = data.get("template_files") or []
-            client_table_targets = data.get("table_targets") or []
-
-            # 实体提取模式
-            if mode == "entity_extraction":
-                db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
-                db_path_map = {f.get('file_name'): f for f in db_data_files}
-                db_tpl_path_map = {f.get('file_name'): f for f in db_template_files}
-                if client_files:
-                    files = []
-                    for cf in client_files:
-                        matched = db_path_map.get(cf.get('file_name'))
-                        if matched:
-                            files.append(matched)
-                        elif cf.get('storage_key'):
-                            files.append(cf)
-                else:
-                    files = db_data_files
-                if client_templates:
-                    template_files = []
-                    for ct in client_templates:
-                        matched = db_tpl_path_map.get(ct.get('file_name'))
-                        if matched:
-                            template_files.append(matched)
-                        elif ct.get('storage_key'):
-                            template_files.append(ct)
-                else:
-                    template_files = db_template_files
-                # 确保临时文件在数据库中有记录
-                files = _ensure_files_in_db(files, session_id, cfg, current_user.id if current_user else None)
-                template_files = _ensure_files_in_db(template_files, session_id, cfg, current_user.id if current_user else None)
-            elif mode == "table_filling":
-                # 表格填表模式走直达执行核，保证与 tests/test_d/run.py 同构。
-                db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
-                db_path_map = {f.get('file_name'): f for f in db_data_files}
-                db_tpl_path_map = {f.get('file_name'): f for f in db_template_files}
-                if client_files:
-                    files = []
-                    for cf in client_files:
-                        matched = db_path_map.get(cf.get('file_name'))
-                        if matched:
-                            files.append(matched)
-                        elif cf.get('storage_key'):
-                            files.append(cf)
-                else:
-                    files = db_data_files
-                if client_templates:
-                    template_files = []
-                    for ct in client_templates:
-                        matched = db_tpl_path_map.get(ct.get('file_name'))
-                        if matched:
-                            template_files.append(matched)
-                        elif ct.get('storage_key'):
-                            template_files.append(ct)
-                else:
-                    template_files = db_template_files
-                # 确保临时文件在数据库中有记录
-                files = _ensure_files_in_db(files, session_id, cfg, current_user.id if current_user else None)
-                template_files = _ensure_files_in_db(template_files, session_id, cfg, current_user.id if current_user else None)
-
-                source_file, template_file = _pick_table_filling_inputs(files, template_files)
-                if source_file and template_file:
-                    print(f"[API] WS table_filling 开始处理 session_id={session_id} source={source_file.get('file_name')} template={template_file.get('file_name')}")
-                    user_meta: Dict[str, Any] = {"mode": mode}
-                    if files:
-                        user_meta["files"] = files
-                    if template_files:
-                        user_meta["template_files"] = template_files
-                    add_message(session_id, "user", user_content, user_meta, config=cfg, user_id=current_user.id if current_user else None)
-                    print(f"[WS] 发送 table_filling start type=start mode={mode}")
-                    await manager.send_json(session_id, {"type": "start", "mode": mode})
-                    print(f"[WS] 调用 run_agent_d_api...")
-                    response = await asyncio.to_thread(
-                        run_agent_d_api,
-                        src=_resolve_file_reference(source_file, cfg, session_id, "source"),
-                        prompt=user_content,
-                        template=_resolve_file_reference(template_file, cfg, session_id, "template"),
-                        output_json="",
-                        output_template="",
-                        allow_rule_fallback=True,
-                        table_targets=client_table_targets if isinstance(client_table_targets, list) else None,
-                    )
-                    print(f"[API] WS run_agent_d_api 完成, 响应长度={len(str(response))}")
-                    if isinstance(response, dict):
-                        data_obj = response.get("data") if isinstance(response.get("data"), dict) else {}
-                        resolved_obj = response.get("resolved_input") if isinstance(response.get("resolved_input"), dict) else {}
-                        print(
-                            f"[API] WS run_agent_d_api 摘要: success={response.get('success')} "
-                            f"status={data_obj.get('status')} reason={data_obj.get('reason')}"
-                        )
-                        print(
-                            f"[API] WS run_agent_d_api 原始字段: "
-                            f"data.output_json={data_obj.get('output_json')} "
-                            f"data.template_output={data_obj.get('template_output')} "
-                            f"resolved.output_json={resolved_obj.get('output_json')} "
-                            f"resolved.output_template={resolved_obj.get('output_template')}"
-                        )
-                    table_filling_data = _flatten_table_filling_response(response)
-                    if not table_filling_data.get("success", False):
-                        error_msg = table_filling_data.get("message") or "表格填表失败"
-                        print(
-                            f"[API] WS table_filling 失败: message={error_msg}; "
-                            f"reason={table_filling_data.get('reason')}; "
-                            f"signal={table_filling_data.get('multi_target_signal_level')}; "
-                            f"llm_mode={table_filling_data.get('multi_target_mode_by_llm')}"
-                        )
-                        await manager.send_json(
-                            session_id,
-                            {
-                                "type": "error",
-                                "mode": mode,
-                                "result_type": "table_filling",
-                                "message": error_msg,
-                                "data": table_filling_data,
-                            },
-                        )
-                        add_message(
-                            session_id,
-                            "assistant",
-                            error_msg,
-                            {"mode": mode, "tableFillingData": table_filling_data},
-                            config=cfg,
-                            user_id=current_user.id if current_user else None,
-                        )
-                        continue
-                    print(f"[API] WS table_filling_data keys={list(table_filling_data.keys())}")
-                    print(f"[API] WS table_filling_data template_output={table_filling_data.get('template_output')} output_json={table_filling_data.get('output_json')} template_source={table_filling_data.get('template_source')}")
-                    saved = _save_table_filling_files(session_id, cfg, current_user.id if current_user else None, table_filling_data)
-                    print(f"[API] WS _save_table_filling_files 返回: {saved}")
-                    if saved:
-                        table_filling_data["generated_files"] = saved
-                    preview_rows = _build_table_filling_preview_rows(table_filling_data)
-                    if preview_rows:
-                        table_filling_data["previewData"] = preview_rows
-                        print(f"[API] WS table_filling 附加 previewData 行数={len(preview_rows)}")
-                    full_response = json.dumps(table_filling_data, ensure_ascii=False)
-                    print(f"[API] WS 发送 table_filling chunk, 内容长度={len(full_response)}")
-                    await manager.send_json(session_id, {"type": "chunk", "content": full_response, "result_type": "table_filling"})
-                    add_message(session_id, "assistant", table_filling_data.get("message", ""), {"mode": mode, "tableFillingData": table_filling_data}, config=cfg, user_id=current_user.id if current_user else None)
-                    print(f"[API] WS 发送 table_filling done")
-                    done_payload: Dict[str, Any] = {
-                        "type": "done",
-                        "mode": mode,
-                        "result_type": "table_filling",
-                        "table_filling_data": table_filling_data,
-                    }
-                    final_files = saved if saved else _fallback_table_filling_generated_files(table_filling_data)
-                    if final_files:
-                        done_payload["generated_files"] = final_files
-                    await manager.send_json(session_id, done_payload)
-                    continue
-            elif client_files or client_templates:
-                files = client_files
-                template_files = client_templates
-            else:
-                files, template_files = get_selected_session_files_payload(session_id, cfg)
-
-            # 确保临时文件在数据库中有记录
-            files = _ensure_files_in_db(files, session_id, cfg, current_user.id if current_user else None)
-            template_files = _ensure_files_in_db(template_files, session_id, cfg, current_user.id if current_user else None)
-
-            user_meta: Dict[str, Any] = {"mode": mode}
-            if files:
-                user_meta["files"] = files
-            if template_files:
-                user_meta["template_files"] = template_files
-
-            # 保存用户消息（含附件元数据）
-            add_message(session_id, "user", user_content, user_meta, config=cfg, user_id=current_user.id if current_user else None)
-            
-            # 发送开始信号
-            print(f"[WS] 发送 start type=start mode={mode} session_id={session_id}")
-            await manager.send_json(session_id, {"type": "start", "mode": mode})
-
-            before_file_ids = {
-                f.id for f in get_session_files(session_id, config=cfg, user_id=current_user.id if current_user else None)
-            }
-
-            # 进度队列：线程安全信令，规避 run_coroutine_threadsafe 在主 loop 阻塞时无法执行的问题
-            progress_queue: queue.Queue = queue.Queue()
-
-            def progress_callback(completed: int, total: int, message: str):
-                percent = int(completed / total * 100) if total > 0 else 0
-                progress_queue.put_nowait({
-                    "type": "progress",
-                    "progress": percent,
-                    "message": message,
-                })
-
-            # 在后台线程跑提取，主 loop 保持空闲以处理 WebSocket
-            agent_service = AgentService()
-            full_response = ""
-
-            async def drain_queue():
-                """每 50ms 把队列中的进度消息发往 WebSocket"""
-                while not progress_queue.empty():
-                    try:
-                        msg = progress_queue.get_nowait()
-                        # _done 标记仅用于退出循环，不发往 WebSocket
-                        if msg.get("_done"):
-                            continue
-                        await manager.send_json(session_id, msg)
-                    except queue.Empty:
-                        break
-
-            async def extraction_task():
-                nonlocal full_response
-                try:
-                    async for chunk in agent_service.chat_stream(
-                        session_id,
-                        user_content,
-                        mode,
-                        files=files,
-                        template_files=template_files,
-                        progress_callback=progress_callback if mode in ("entity_extraction", "table_filling") else None,
-                    ):
-                        full_response += chunk
-                        if mode == "entity_extraction":
-                            print(f"[WS] 发送 entity_extraction chunk, 内容长度={len(chunk)} session_id={session_id}")
-                            await manager.send_json(session_id, {"type": "chunk", "content": chunk, "result_type": "entity_extraction"})
-                        elif mode == "table_filling":
-                            print(f"[WS] 发送 table_filling chunk, 内容长度={len(chunk)} session_id={session_id}")
-                            await manager.send_json(session_id, {"type": "chunk", "content": chunk, "result_type": "table_filling"})
-                        else:
-                            print(f"[WS] 发送普通 chunk, 内容长度={len(chunk)} session_id={session_id}")
-                            await manager.send_json(session_id, {"type": "chunk", "content": chunk})
-                finally:
-                    progress_queue.put_nowait({"_done": True})
-
-            # 并发：提取跑后台 + 主 loop 轮询进度队列
-            ext_task = asyncio.create_task(extraction_task())
-            while not ext_task.done():
-                await drain_queue()
-                await asyncio.sleep(0.05)
-            await drain_queue()
-
-            assistant_content = full_response
-            assistant_meta: Dict[str, Any] = {"mode": mode}
-            extraction_files: List[Dict[str, Any]] = []
-            if mode == "entity_extraction":
-                assistant_content = _normalize_entity_extraction_response(full_response)
-                extraction_files = _save_entity_extraction_files(
-                    session_id,
-                    cfg,
-                    current_user.id if current_user else None,
-                    full_response,
-                )
-
-            generated_files = _collect_new_generated_files(
-                session_id,
-                cfg,
-                current_user.id if current_user else None,
-                before_file_ids,
+    # 表格填表模式单独处理（同 WebSocket 逻辑）
+    if mode == "table_filling":
+        source_file, template_file = _pick_table_filling_inputs(files, template_files)
+        if source_file and template_file:
+            print(f"[SSE] table_filling start session_id={session_id}")
+            response = await asyncio.to_thread(
+                run_agent_d_api,
+                src=_resolve_file_reference(source_file, cfg, session_id, "source"),
+                prompt=content,
+                template=_resolve_file_reference(template_file, cfg, session_id, "template"),
+                output_json="",
+                output_template="",
+                allow_rule_fallback=True,
             )
-            if extraction_files:
-                assistant_meta["generated_files"] = extraction_files
-            elif generated_files:
-                assistant_meta["generated_files"] = generated_files
-            elif mode == "table_filling":
-                try:
-                    parsed = json.loads(full_response)
-                except Exception:
-                    parsed = None
-                if isinstance(parsed, dict):
-                    fallback_files = _fallback_table_filling_generated_files(parsed)
-                    if fallback_files:
-                        assistant_meta["generated_files"] = fallback_files
-                    assistant_meta["tableFillingData"] = parsed
+            table_filling_data = _flatten_table_filling_response(response)
+            if not table_filling_data.get("success", False):
+                error_msg = table_filling_data.get("message") or "表格填表失败"
+                await event_bus.publish(session_id, {"type": "error", "mode": mode, "result_type": "table_filling", "message": error_msg, "data": table_filling_data})
+                add_message(session_id, "assistant", error_msg, {"mode": mode, "tableFillingData": table_filling_data}, config=cfg, user_id=user_id)
+                return
 
-            add_message(
-                session_id,
-                "assistant",
-                assistant_content,
-                assistant_meta,
-                config=cfg,
-                user_id=current_user.id if current_user else None,
-            )
-            # done 消息带上 generated_files，前端据此显示下载按钮
-            done_payload: Dict[str, Any] = {"type": "done", "mode": mode}
-            final_files = extraction_files if extraction_files else generated_files
-            if mode == "table_filling" and not final_files:
-                tf_data = assistant_meta.get("tableFillingData")
-                if isinstance(tf_data, dict):
-                    final_files = _fallback_table_filling_generated_files(tf_data)
-                    done_payload["result_type"] = "table_filling"
-                    done_payload["table_filling_data"] = tf_data
+            saved = _save_table_filling_files(session_id, cfg, user_id, table_filling_data)
+            if saved:
+                table_filling_data["generated_files"] = saved
+            preview_rows = _build_table_filling_preview_rows(table_filling_data)
+            if preview_rows:
+                table_filling_data["previewData"] = preview_rows
+
+            full_response = json.dumps(table_filling_data, ensure_ascii=False)
+            await event_bus.publish(session_id, {"type": "chunk", "content": full_response, "result_type": "table_filling"})
+            add_message(session_id, "assistant", table_filling_data.get("message", ""), {"mode": mode, "tableFillingData": table_filling_data}, config=cfg, user_id=user_id)
+
+            done_payload = {"type": "done", "mode": mode, "result_type": "table_filling", "table_filling_data": table_filling_data}
+            final_files = saved if saved else _fallback_table_filling_generated_files(table_filling_data)
             if final_files:
                 done_payload["generated_files"] = final_files
-            print(f"[WS] done_payload generated_files: {done_payload.get('generated_files')}")
-            await manager.send_json(session_id, done_payload)
-            print(f"[WS] 发送 done session_id={session_id} extraction_files={extraction_files} generated_files={generated_files}")
-            
-    except WebSocketDisconnect:
-        print(f"[WS] WebSocketDisconnect 正常断开 session_id={session_id}")
-        pass  # 正常断开
-    except Exception as e:
-        print(f"[WS] Exception: {e} session_id={session_id}")
-        import traceback; traceback.print_exc()
-        await manager.send_json(session_id, {"type": "error", "message": str(e)})
+            await event_bus.publish(session_id, done_payload)
+            return
+
+    # 进度队列
+    progress_queue: _queue_module.Queue = _queue_module.Queue()
+
+    def progress_callback(completed: int, total: int, message: str):
+        percent = int(completed / total * 100) if total > 0 else 0
+        progress_queue.put_nowait({"type": "progress", "progress": percent, "message": message})
+
+    agent_service = AgentService()
+    full_response = ""
+    extraction_files: List[Dict[str, Any]] = []
+
+    try:
+        async for chunk in agent_service.chat_stream(
+            session_id,
+            content,
+            mode=mode,
+            files=files,
+            template_files=template_files,
+            progress_callback=progress_callback if mode in ("entity_extraction", "table_filling") else None,
+        ):
+            full_response += chunk
+            # 处理进度队列中的消息
+            while not progress_queue.empty():
+                try:
+                    progress_msg = progress_queue.get_nowait()
+                    await event_bus.publish(session_id, progress_msg)
+                except _queue_module.Empty:
+                    break
+
+            if mode == "entity_extraction":
+                await event_bus.publish(session_id, {"type": "chunk", "content": chunk, "result_type": "entity_extraction"})
+            else:
+                await event_bus.publish(session_id, {"type": "chunk", "content": chunk})
     finally:
-        manager.disconnect(session_id)
+        # 清空剩余的进度消息
+        while not progress_queue.empty():
+            try:
+                progress_msg = progress_queue.get_nowait()
+                await event_bus.publish(session_id, progress_msg)
+            except _queue_module.Empty:
+                break
+
+    assistant_content = full_response
+    assistant_meta: Dict[str, Any] = {"mode": mode}
+
+    if mode == "entity_extraction":
+        assistant_content = _normalize_entity_extraction_response(full_response)
+        extraction_files = _save_entity_extraction_files(session_id, cfg, user_id, full_response)
+
+    generated_files = _collect_new_generated_files(session_id, cfg, user_id, before_file_ids)
+    if extraction_files:
+        assistant_meta["generated_files"] = extraction_files
+    elif generated_files:
+        assistant_meta["generated_files"] = generated_files
+
+    add_message(session_id, "assistant", assistant_content, assistant_meta, config=cfg, user_id=user_id)
+
+    done_payload = {"type": "done", "mode": mode}
+    final_files = extraction_files if extraction_files else generated_files
+    if final_files:
+        done_payload["generated_files"] = final_files
+    await event_bus.publish(session_id, done_payload)
+    print(f"[SSE] 发送 done session_id={session_id}")
+
+
+@router.get("/stream/{session_id}")
+async def stream_messages(session_id: str):
+    """
+    SSE 流式端点。
+    前端通过 EventSource 连接到此端点，接收流式事件（start/chunk/progress/done/error）。
+    """
+    async def event_generator():
+        async for event in event_bus.subscribe(session_id):
+            if event.get("type") == "keepalive":
+                yield f": keepalive\n\n"
+            else:
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if event.get("type") in ("done", "error"):
+                break
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    })

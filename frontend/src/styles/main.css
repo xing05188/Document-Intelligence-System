@@ -663,14 +663,11 @@ input, textarea, select {
 
 /* Session Actions */
 .session-actions {
-  display: none;
+  display: flex;
   align-items: center;
   gap: 4px;
   margin-left: auto;
-}
-
-.session-item:hover .session-actions {
-  display: flex;
+  flex-shrink: 0;
 }
 
 .session-action-btn {
@@ -683,7 +680,7 @@ input, textarea, select {
   border: none;
   border-radius: 6px;
   cursor: pointer;
-  font-size: 14px;
+  padding: 0;
   transition: all 0.2s;
 }
 
@@ -3280,6 +3277,388 @@ input, textarea, select {
   gap: 12px;
   padding: 20px 24px;
   border-top: 1px solid var(--border-color);
+}
+
+/* ===========================
+   文档库导入弹窗 (ChatView)
+   =========================== */
+.lib-import-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.lib-import-modal {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xl);
+  width: 500px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-lg);
+}
+
+.lib-import-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.lib-import-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.lib-import-close {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 20px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.lib-import-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.lib-import-body {
+  flex: 1;
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+
+.lib-import-section {
+  margin-bottom: 16px;
+}
+
+.lib-import-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.lib-import-select {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--text-primary);
+  outline: none;
+  cursor: pointer;
+}
+
+.lib-import-select:focus {
+  border-color: var(--accent-primary);
+}
+
+.lib-import-loading,
+.lib-import-empty {
+  padding: 24px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.lib-import-docs {
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lib-import-doc-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.lib-import-doc-item:hover {
+  background: var(--bg-hover);
+}
+
+.lib-import-doc-item.selected {
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.lib-import-check {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border-color);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: transparent;
+  transition: all 0.2s;
+}
+
+.lib-import-doc-item.selected .lib-import-check {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #fff;
+}
+
+.lib-import-doc-icon {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.lib-import-doc-name {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lib-import-doc-size {
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.lib-import-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border-color);
+}
+
+.lib-import-btn {
+  padding: 8px 18px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: inherit;
+}
+
+.lib-import-btn.cancel {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.lib-import-btn.cancel:hover {
+  background: var(--bg-hover);
+}
+
+.lib-import-btn.confirm {
+  background: var(--accent-primary);
+  border: none;
+  color: #fff;
+}
+
+.lib-import-btn.confirm:hover {
+  background: var(--accent-hover);
+}
+
+.lib-import-btn.confirm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ===========================
+   保存到文档库弹窗
+   =========================== */
+.save-lib-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.4);
+  z-index: 10000;
+}
+
+.save-lib-modal {
+  background: var(--bg-card, #fff);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+  width: 420px;
+  max-width: 90vw;
+  overflow: hidden;
+}
+
+.save-lib-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  font-weight: 600;
+  font-size: 15px;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+}
+
+.save-lib-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  cursor: pointer;
+  color: var(--text-muted, #9ca3af);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.save-lib-close:hover {
+  background: var(--bg-hover, #f3f4f6);
+}
+
+.save-lib-body {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.save-lib-file-info,
+.save-lib-space-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.save-lib-label {
+  font-size: 13px;
+  color: var(--text-secondary, #6b7280);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.save-lib-filename {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary, #111827);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.save-lib-select {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 8px;
+  font-size: 14px;
+  background: var(--bg-primary, #fff);
+  color: var(--text-primary, #111827);
+  cursor: pointer;
+}
+
+.save-lib-empty {
+  font-size: 13px;
+  color: var(--text-muted, #9ca3af);
+  text-align: center;
+  padding: 8px 0;
+}
+
+.save-lib-msg {
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #fef3cd;
+  color: #856404;
+}
+
+.save-lib-msg.success {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.save-lib-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border-color, #e5e7eb);
+}
+
+.save-lib-cancel {
+  padding: 8px 18px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 8px;
+  background: transparent;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-secondary, #6b7280);
+}
+
+.save-lib-cancel:hover {
+  background: var(--bg-hover, #f3f4f6);
+}
+
+.save-lib-confirm {
+  padding: 8px 18px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent-primary, #6366f1);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.save-lib-confirm:hover {
+  background: var(--accent-hover, #5558e6);
+}
+
+.save-lib-confirm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.save-to-lib-btn {
+  background: var(--bg-tertiary, #f3f4f6) !important;
+  color: var(--text-secondary, #6b7280) !important;
+  font-size: 11px !important;
+  transition: all 0.2s ease !important;
+}
+
+.save-to-lib-btn:hover {
+  background: var(--accent-primary, #e0e0e3) !important;
+  color: #fff !important;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(139, 139, 148, 0.3);
 }
 
 .modal-btn {
