@@ -58,6 +58,8 @@ htmlcov/
 /test
 /output
 src/output/
+!src/output/__init__.py
+!src/output/result_handler.py
 src/temp/
 
 # 忽略前端依赖
