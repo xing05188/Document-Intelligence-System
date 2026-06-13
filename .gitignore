@@ -57,7 +57,7 @@ htmlcov/
 
 /test
 /output
-src/output/
+src/output/*
 !src/output/__init__.py
 !src/output/result_handler.py
 src/temp/
@@ -76,6 +76,3 @@ src/output/*.json
 src/output/*.xlsx
 src/temp/azure_blob_cache/
 src/temp/file_cache/
-
-
-企业要求.md
