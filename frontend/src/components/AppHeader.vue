@@ -13,7 +13,7 @@ function handleTabClick(tabId) {
 }
 
 async function handleLogout() {
-  await sessionStore.disconnectWebSocket()
+  await sessionStore.disconnectSSE()
   await authStore.logout()
 }
 </script>

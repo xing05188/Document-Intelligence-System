@@ -5,8 +5,9 @@ import { ref, onMounted, onUnmounted, nextTick, watch, computed } from 'vue'
 import { marked } from 'marked'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useFileStore } from '../../stores/fileStore'
+import { useLibraryStore } from '../../stores/libraryStore'
+import libraryApi from '../../api/library'
 import SvgIcon from '../icons/SvgIcon.vue'
-// ChatSidebar is now rendered inside AppSidebar
 
 // 配置 marked
 marked.setOptions({
@@ -14,8 +15,43 @@ marked.setOptions({
   gfm: true,
 })
 
+// Markdown 渲染缓存：key = msg.id|index，避免重复解析
+const _mdCache = new Map()
+const _mdCacheMax = 200
+function cachedRenderMarkdown(content, cacheKey) {
+  if (!content) return ''
+  if (cacheKey != null) {
+    const cached = _mdCache.get(cacheKey)
+    if (cached !== undefined) return cached
+  }
+  const html = marked.parse(content)
+  if (cacheKey != null) {
+    if (_mdCache.size >= _mdCacheMax) {
+      const firstKey = _mdCache.keys().next().value
+      _mdCache.delete(firstKey)
+    }
+    _mdCache.set(cacheKey, html)
+  }
+  return html
+}
+
+// tableFillPreview 缓存：按消息 id 缓存，避免全量重算
+const _tfPreviewCache = new Map()
+function getTfPreviewBundle(msg, index) {
+  const key = msg.id != null && msg.id !== '' ? String(msg.id) : `_i_${index}`
+  const cached = _tfPreviewCache.get(key)
+  if (cached !== undefined) return cached
+  const b = buildTableFillPreviewBundle(msg)
+  _tfPreviewCache.set(key, b)
+  return b
+}
+function clearTfPreviewCache() {
+  _tfPreviewCache.clear()
+}
+
 const sessionStore = useSessionStore()
 const fileStore = useFileStore()
+const libraryStore = useLibraryStore()
 
 const messagesContainer = ref(null)
 const inputText = ref('')
@@ -24,6 +60,60 @@ const isDragover = ref(false)
 const previewEntities = ref({})
 const modeToast = ref('')
 let modeToastTimer = null
+
+// 保存生成文件到文档库
+const showSaveToLibModal = ref(false)
+const saveToLibSpaces = ref([])
+const selectedSaveSpaceId = ref('')
+const savingFileInfo = ref(null)
+const isSavingToLib = ref(false)
+const saveToLibMsg = ref('')
+
+async function openSaveToLib(fileInfo) {
+  savingFileInfo.value = fileInfo
+  saveToLibMsg.value = ''
+  selectedSaveSpaceId.value = ''
+  try {
+    const res = await libraryApi.getSpaces()
+    saveToLibSpaces.value = (res?.spaces || []).map(s => ({
+      id: s.id,
+      name: s.name,
+      icon: s.icon || '📁',
+    }))
+    if (saveToLibSpaces.value.length > 0) {
+      selectedSaveSpaceId.value = saveToLibSpaces.value[0].id
+    }
+    showSaveToLibModal.value = true
+  } catch (e) {
+    saveToLibMsg.value = '加载文档空间失败: ' + (e.message || '')
+  }
+}
+
+async function confirmSaveToLib() {
+  if (!selectedSaveSpaceId.value || !savingFileInfo.value) return
+  isSavingToLib.value = true
+  saveToLibMsg.value = ''
+  try {
+    await libraryApi.saveGeneratedFile(selectedSaveSpaceId.value, {
+      file_path: savingFileInfo.value.file_path,
+      file_name: savingFileInfo.value.file_name,
+    })
+    saveToLibMsg.value = '✓ 已保存到文档库'
+    setTimeout(() => { showSaveToLibModal.value = false }, 1200)
+  } catch (e) {
+    saveToLibMsg.value = '保存失败: ' + (e.response?.data?.detail || e.message || '')
+  } finally {
+    isSavingToLib.value = false
+  }
+}
+
+// 文档库导入弹窗
+const showLibraryModal = ref(false)
+const libSpaces = ref([])
+const selectedLibSpaceId = ref('')
+const libDocs = ref([])
+const loadingLibDocs = ref(false)
+const selectedLibDocIds = ref(new Set())
 
 const showProgress = computed(() => sessionStore.showProgressBar)
 const progressVal = computed(() => sessionStore.progressValue)
@@ -68,6 +158,9 @@ function scrollToBottom() {
 }
 
 watch(() => sessionStore.currentSessionId, () => {
+  // 切换会话时清空渲染缓存
+  _mdCache.clear()
+  _tfPreviewCache.clear()
   scrollToBottom()
 })
 
@@ -80,12 +173,12 @@ watch(() => sessionStore.isStreaming, (streaming) => {
 })
 
 onMounted(() => {
-  sessionStore.connectWebSocket()
+  sessionStore.connectSSE()
   scrollToBottom()
 })
 
 onUnmounted(() => {
-  sessionStore.disconnectWebSocket()
+  sessionStore.disconnectSSE()
   if (modeToastTimer) clearTimeout(modeToastTimer)
 })
 
@@ -105,11 +198,6 @@ function formatTime(isoString) {
 
 function copyMessage(content) {
   navigator.clipboard.writeText(content)
-}
-
-function renderMarkdown(content) {
-  if (!content) return ''
-  return marked.parse(content)
 }
 
 function autoResize() {
@@ -174,6 +262,63 @@ function triggerFileInput() {
 function switchFileType(type) {
   fileStore.switchFileType(type)
 }
+
+// ==================== 从文档库导入 ====================
+async function openLibraryModal() {
+  showLibraryModal.value = true
+  selectedLibSpaceId.value = ''
+  libDocs.value = []
+  selectedLibDocIds.value = new Set()
+  try {
+    const res = await libraryApi.getSpaces()
+    libSpaces.value = res?.spaces || []
+  } catch (e) {
+    console.error('加载文档库空间失败:', e)
+    libSpaces.value = []
+  }
+}
+
+async function onLibSpaceChange(spaceId) {
+  selectedLibSpaceId.value = spaceId
+  selectedLibDocIds.value = new Set()
+  if (!spaceId) {
+    libDocs.value = []
+    return
+  }
+  loadingLibDocs.value = true
+  try {
+    await libraryStore.loadDocs(spaceId)
+    libDocs.value = [...libraryStore.currentDocs]
+  } catch (e) {
+    console.error('加载文档失败:', e)
+    libDocs.value = []
+  } finally {
+    loadingLibDocs.value = false
+  }
+}
+
+function toggleLibDoc(docId) {
+  const set = new Set(selectedLibDocIds.value)
+  if (set.has(docId)) {
+    set.delete(docId)
+  } else {
+    set.add(docId)
+  }
+  selectedLibDocIds.value = set
+}
+
+function importSelectedDocs() {
+  const docs = libDocs.value.filter(d => selectedLibDocIds.value.has(d.id))
+  for (const doc of docs) {
+    fileStore.addLibraryFile(doc)
+  }
+  showLibraryModal.value = false
+}
+
+function closeLibraryModal() {
+  showLibraryModal.value = false
+}
+// ====================
 
 function removeFile(id, type) {
   fileStore.removeFile(id, type)
@@ -352,26 +497,12 @@ function buildTableFillPreviewBundle(msg) {
   return { tf, columns, displayRows, totalRows: rows.length, extra }
 }
 
-const tableFillPreviewByMessageKey = computed(() => {
-  const list = sessionStore.messages
-  const out = {}
-  for (let i = 0; i < list.length; i++) {
-    const msg = list[i]
-    if (msg.role !== 'assistant') continue
-    const key = msg.id != null && msg.id !== '' ? String(msg.id) : `_i_${i}`
-    const b = buildTableFillPreviewBundle(msg)
-    if (b) out[key] = b
-  }
-  return out
-})
-
 function tablePreviewBundleFor(msg, index) {
-  const key = msg.id != null && msg.id !== '' ? String(msg.id) : `_i_${index}`
-  return tableFillPreviewByMessageKey.value[key] || null
+  return getTfPreviewBundle(msg, index)
 }
 
 function tablePreviewBundleList(msg, index) {
-  const b = tablePreviewBundleFor(msg, index)
+  const b = getTfPreviewBundle(msg, index)
   return b ? [b] : []
 }
 
@@ -492,7 +623,7 @@ function userMessageAttachments(msg) {
             </div>
             <!-- 助手消息 -->
             <div v-else class="message-bubble" :class="{ 'md-content': msg.role === 'assistant' }">
-              <div v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)"></div>
+              <div v-if="msg.role === 'assistant'" v-html="cachedRenderMarkdown(msg.content, msg.id)"></div>
               <!-- Loading 动画 -->
               <div v-if="msg.isLoading" class="typing-indicator">
                 <span class="typing-dot"></span>
@@ -681,6 +812,9 @@ function userMessageAttachments(msg) {
                     <button v-for="f in msg.generated_files" :key="f.file_id" class="entity-action-btn" @click="downloadResultFile(f)">
                       {{ getFileExt(f.file_name) }} ↓
                     </button>
+                    <button v-for="f in msg.generated_files" :key="'lib-'+f.file_id" class="entity-action-btn save-to-lib-btn" type="button" @click="openSaveToLib(f)">
+                      保存到文档库
+                    </button>
                   </div>
                 </div>
               </div>
@@ -694,6 +828,9 @@ function userMessageAttachments(msg) {
                   <div class="entity-preview-actions">
                     <button v-for="f in msg.generated_files" :key="f.file_id" class="entity-action-btn" @click="downloadResultFile(f)">
                       {{ getFileExt(f.file_name) }} ↓
+                    </button>
+                    <button v-for="f in msg.generated_files" :key="'lib-'+f.file_id" class="entity-action-btn save-to-lib-btn" type="button" @click="openSaveToLib(f)">
+                      保存到文档库
                     </button>
                   </div>
                 </div>
@@ -732,6 +869,49 @@ function userMessageAttachments(msg) {
           </div>
         </div>
       </div>
+
+      <!-- 保存到文档库弹窗 -->
+      <Teleport to="body">
+        <div v-if="showSaveToLibModal" class="save-lib-overlay" @click.self="showSaveToLibModal = false">
+          <div class="save-lib-modal">
+            <div class="save-lib-header">
+              <span>保存到文档库</span>
+              <button class="save-lib-close" type="button" @click="showSaveToLibModal = false">×</button>
+            </div>
+            <div class="save-lib-body">
+              <div class="save-lib-file-info">
+                <span class="save-lib-label">文件：</span>
+                <span class="save-lib-filename">{{ savingFileInfo?.file_name }}</span>
+              </div>
+              <div class="save-lib-space-select">
+                <span class="save-lib-label">目标空间：</span>
+                <select v-model="selectedSaveSpaceId" class="save-lib-select">
+                  <option v-for="s in saveToLibSpaces" :key="s.id" :value="s.id">
+                    {{ s.icon }} {{ s.name }}
+                  </option>
+                </select>
+              </div>
+              <div v-if="saveToLibSpaces.length === 0 && !saveToLibMsg" class="save-lib-empty">
+                暂无文档空间，请先在文档库中创建
+              </div>
+              <div v-if="saveToLibMsg" class="save-lib-msg" :class="{ success: saveToLibMsg.startsWith('✓') }">
+                {{ saveToLibMsg }}
+              </div>
+            </div>
+            <div class="save-lib-footer">
+              <button class="save-lib-cancel" type="button" @click="showSaveToLibModal = false">取消</button>
+              <button
+                class="save-lib-confirm"
+                type="button"
+                :disabled="!selectedSaveSpaceId || isSavingToLib"
+                @click="confirmSaveToLib"
+              >
+                {{ isSavingToLib ? '保存中...' : '确认保存' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Teleport>
 
       <div class="chat-input-area">
         <div
@@ -833,6 +1013,15 @@ function userMessageAttachments(msg) {
                 <span>文件上传</span>
               </button>
 
+              <button
+                class="toolbar-upload-btn"
+                type="button"
+                @click="openLibraryModal"
+              >
+                <SvgIcon name="book" :size="16" />
+                <span>从文档库</span>
+              </button>
+
               <div class="file-count-badges" v-if="fileStore.hasFiles">
                 <span v-if="fileStore.hasDataFiles" class="file-badge data-badge">
                   <SvgIcon name="dataFile" :size="14" /> {{ fileStore.dataCount }}
@@ -857,6 +1046,67 @@ function userMessageAttachments(msg) {
       </div>
     </div>
   </div>
+
+  <!-- 文档库导入弹窗 -->
+  <Teleport to="body">
+    <div v-if="showLibraryModal" class="lib-import-overlay" @click.self="closeLibraryModal">
+      <div class="lib-import-modal">
+        <div class="lib-import-header">
+          <h3>从文档库导入</h3>
+          <button class="lib-import-close" @click="closeLibraryModal">×</button>
+        </div>
+        <div class="lib-import-body">
+          <!-- 空间选择 -->
+          <div class="lib-import-section">
+            <label class="lib-import-label">选择文档库</label>
+            <select
+              class="lib-import-select"
+              :value="selectedLibSpaceId"
+              @change="onLibSpaceChange($event.target.value)"
+            >
+              <option value="">-- 请选择 --</option>
+              <option v-for="sp in libSpaces" :key="sp.id" :value="sp.id">
+                {{ sp.name }}
+              </option>
+            </select>
+          </div>
+
+          <!-- 文档列表 -->
+          <div v-if="selectedLibSpaceId" class="lib-import-section">
+            <label class="lib-import-label">选择文档</label>
+            <div v-if="loadingLibDocs" class="lib-import-loading">加载中...</div>
+            <div v-else-if="libDocs.length === 0" class="lib-import-empty">该文档库暂无文档</div>
+            <div v-else class="lib-import-docs">
+              <div
+                v-for="doc in libDocs"
+                :key="doc.id"
+                class="lib-import-doc-item"
+                :class="{ selected: selectedLibDocIds.has(doc.id) }"
+                @click="toggleLibDoc(doc.id)"
+              >
+                <span class="lib-import-check">
+                  <span v-if="selectedLibDocIds.has(doc.id)">✓</span>
+                </span>
+                <span class="lib-import-doc-icon"><SvgIcon name="file" :size="16" /></span>
+                <span class="lib-import-doc-name">{{ doc.name }}</span>
+                <span class="lib-import-doc-size">{{ doc.size }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="lib-import-footer">
+          <button class="lib-import-btn cancel" @click="closeLibraryModal">取消</button>
+          <button
+            class="lib-import-btn confirm"
+            :disabled="selectedLibDocIds.size === 0"
+            @click="importSelectedDocs"
+          >
+            确认导入 ({{ selectedLibDocIds.size }})
+          </button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>

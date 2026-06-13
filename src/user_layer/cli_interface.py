@@ -692,7 +692,7 @@ class CLIInterface:
             # 检查文件类型
             selected_type = self.selected_files[0].file_type.value.lower()
             allowed_types = {
-                TaskType.DOCUMENT_EDITING: ["DOCX", "docx"],
+                TaskType.DOCUMENT_EDITING: ["DOCX", "docx", "MD", "md", "TXT", "txt", "XLSX", "xlsx"],
                 TaskType.ENTITY_EXTRACTION: ["DOCX", "docx", "PDF", "pdf", "TXT", "txt", "MD", "md"],
                 TaskType.TABLE_FILLING: ["XLSX", "xlsx", "XLS", "xls"],
             }

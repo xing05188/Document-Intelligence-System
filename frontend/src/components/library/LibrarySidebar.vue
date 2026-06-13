@@ -324,10 +324,6 @@ function closeDeleteModal() {
   color: var(--accent-primary);
 }
 
-.space-item:hover .space-delete-btn {
-  opacity: 1;
-}
-
 .space-icon {
   font-size: 18px;
   flex-shrink: 0;
@@ -352,7 +348,6 @@ function closeDeleteModal() {
 }
 
 .space-delete-btn {
-  opacity: 0;
   width: 20px;
   height: 20px;
   display: flex;

@@ -9,11 +9,14 @@ export default {
     return client.post(`/messages/${sessionId}`, data)
   },
 
-  connect(sessionId) {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  /**
+   * 返回 SSE 流式端点的完整 URL（包含认证 token）
+   */
+  streamUrl(sessionId) {
+    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
     const host = window.location.host
     const token = window.localStorage.getItem('access_token')
     const query = token ? `?token=${encodeURIComponent(token)}` : ''
-    return new WebSocket(`${protocol}//${host}/api/messages/ws/${sessionId}${query}`)
+    return `${protocol}//${host}/api/messages/stream/${sessionId}${query}`
   },
 }

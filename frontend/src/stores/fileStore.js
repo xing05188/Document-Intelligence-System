@@ -54,6 +54,20 @@ export const useFileStore = defineStore('file', () => {
     tempFiles.value[type].push(fileInfo)
   }
 
+  /** 从文档库添加已上传的文件（无需再上传） */
+  function addLibraryFile(file) {
+    tempFiles.value.data.push({
+      id: file.id,
+      file_name: file.name,
+      file_size: file.size_bytes || file.size,
+      file_type: 'data',
+      storage_key: file.storage_key || file.file_path,
+      file_path: file.storage_key || file.file_path,
+      is_selected: true,
+      created_at: new Date().toISOString(),
+    })
+  }
+
   async function removeFile(id, type) {
     const index = tempFiles.value[type].findIndex(f => f.id === id)
     if (index > -1) {
@@ -121,6 +135,7 @@ export const useFileStore = defineStore('file', () => {
     isUploading,
     switchFileType,
     addFile,
+    addLibraryFile,
     removeFile,
     toggleFileSelection,
     toggleFilesPanel,
