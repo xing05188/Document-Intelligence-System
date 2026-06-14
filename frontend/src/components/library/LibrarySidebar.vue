@@ -84,6 +84,53 @@ function closeDeleteModal() {
   showDeleteModal.value = false
   deleteTargetSpace.value = null
 }
+
+// ==================== 重命名空间 ====================
+const showRenameModal = ref(false)
+const renameTarget = ref(null)
+const renameForm = ref({ name: '', icon: 'folder', description: '' })
+const isRenaming = ref(false)
+const renameError = ref('')
+
+function openRenameModal(space, event) {
+  event.stopPropagation()
+  renameTarget.value = space
+  renameForm.value = {
+    name: space.name,
+    icon: space.icon || 'folder',
+    description: space.description || '',
+  }
+  renameError.value = ''
+  showRenameModal.value = true
+}
+
+async function handleRenameSpace() {
+  const { name } = renameForm.value
+  if (!name.trim()) {
+    renameError.value = '空间名称不能为空'
+    return
+  }
+  isRenaming.value = true
+  renameError.value = ''
+  try {
+    await libraryStore.renameSpace(renameTarget.value.id, {
+      name: name.trim(),
+      icon: renameForm.value.icon,
+      description: renameForm.value.description,
+    })
+    showRenameModal.value = false
+    renameTarget.value = null
+  } catch (e) {
+    renameError.value = e.message || '重命名失败，请重试'
+  } finally {
+    isRenaming.value = false
+  }
+}
+
+function closeRenameModal() {
+  showRenameModal.value = false
+  renameTarget.value = null
+}
 </script>
 
 <template>
@@ -120,6 +167,13 @@ function closeDeleteModal() {
         <span class="space-icon"><SvgIcon :name="space.icon" :size="18" /></span>
         <span class="space-name">{{ space.name }}</span>
         <span class="space-count">{{ space.doc_count }}</span>
+        <button
+          class="space-rename-btn"
+          title="重命名空间"
+          @click="openRenameModal(space, $event)"
+        >
+          ✎
+        </button>
         <button
           class="space-delete-btn"
           title="删除空间"
@@ -240,6 +294,79 @@ function closeDeleteModal() {
             >
               <span v-if="isDeleting" class="btn-spinner"></span>
               <span v-else>确认删除</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ==================== 重命名空间弹窗 ==================== -->
+    <Teleport to="body">
+      <div class="modal-overlay" :class="{ active: showRenameModal }" @click.self="closeRenameModal">
+        <div class="modal">
+          <div class="modal-header">
+            <span class="modal-title">重命名文档空间</span>
+            <button class="modal-close" @click="closeRenameModal">×</button>
+          </div>
+
+          <div class="modal-body">
+            <!-- 错误提示 -->
+            <div v-if="renameError" class="modal-error">
+              <span class="error-icon"><SvgIcon name="warning" :size="16" /></span>
+              <span>{{ renameError }}</span>
+            </div>
+
+            <!-- 空间名称 -->
+            <div class="form-field">
+              <label class="form-label">空间名称</label>
+              <input
+                v-model="renameForm.name"
+                class="form-input"
+                placeholder="请输入新的空间名称"
+                maxlength="50"
+                @keyup.enter="handleRenameSpace"
+                @input="renameError = ''"
+              />
+            </div>
+
+            <!-- 选择图标 -->
+            <div class="form-field">
+              <label class="form-label">选择图标</label>
+              <div class="icon-grid">
+                <button
+                  v-for="icon in iconOptions"
+                  :key="icon"
+                  class="icon-btn"
+                  :class="{ selected: renameForm.icon === icon }"
+                  @click="renameForm.icon = icon"
+                >
+                  <SvgIcon :name="icon" :size="20" />
+                </button>
+              </div>
+            </div>
+
+            <!-- 空间描述 -->
+            <div class="form-field">
+              <label class="form-label">空间描述 <span class="optional">(选填)</span></label>
+              <textarea
+                v-model="renameForm.description"
+                class="form-textarea"
+                placeholder="简要描述这个空间的用途..."
+                rows="3"
+                maxlength="200"
+              ></textarea>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button class="modal-btn cancel" @click="closeRenameModal">取消</button>
+            <button
+              class="modal-btn primary"
+              :disabled="isRenaming"
+              @click="handleRenameSpace"
+            >
+              <span v-if="isRenaming" class="btn-spinner"></span>
+              <span v-else>保存</span>
             </button>
           </div>
         </div>
@@ -367,6 +494,28 @@ function closeDeleteModal() {
 .space-delete-btn:hover {
   background: rgba(239, 68, 68, 0.15);
   color: var(--accent-danger);
+}
+
+.space-rename-btn {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 16px;
+  font-weight: 400;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.space-rename-btn:hover {
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--accent-primary);
 }
 
 /* Loading & Empty */

@@ -647,7 +647,6 @@ export const useSessionStore = defineStore('session', () => {
       progressMessage.value = data.message
     } else if (data.type === 'chunk') {
       console.log('[SSE] type=chunk, result_type:', data.result_type, 'content长度:', data.content?.length)
-      isStreaming.value = false
       if (data.result_type === 'entity_extraction') {
         try {
           const parsed = JSON.parse(data.content)

@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { useLibraryStore } from '../../stores/libraryStore'
 import libraryApi from '../../api/library'
 import SvgIcon from '../icons/SvgIcon.vue'
+import DocPreview from './DocPreview.vue'
 
 const libraryStore = useLibraryStore()
 
@@ -34,6 +35,21 @@ async function handleDownload(doc, event) {
       downloadingIds.value.delete(doc.id)
     }, 1000)
   }
+}
+
+// ==================== 文档预览 ====================
+const showPreview = ref(false)
+const previewDoc = ref(null)
+
+function openPreview(doc, event) {
+  event.stopPropagation()
+  previewDoc.value = doc
+  showPreview.value = true
+}
+
+function closePreview() {
+  showPreview.value = false
+  previewDoc.value = null
 }
 
 // ==================== 文件上传 ====================
@@ -258,6 +274,15 @@ function getFileIcon(extension) {
           <span v-if="libraryStore.isDocSelected(doc.id)">✓</span>
         </div>
 
+        <!-- View Button -->
+        <button
+          class="doc-view-btn"
+          title="预览文档"
+          @click="openPreview(doc, $event)"
+        >
+          👁
+        </button>
+
         <!-- Delete Button -->
         <button
           class="doc-delete-btn"
@@ -299,6 +324,13 @@ function getFileIcon(extension) {
       </div>
       <span class="progress-text">正在上传... {{ libraryStore.uploadProgress }}%</span>
     </div>
+
+    <!-- ==================== 文档预览弹窗 ==================== -->
+    <DocPreview
+      :doc="previewDoc"
+      :visible="showPreview"
+      @close="closePreview"
+    />
 
     <!-- ==================== 删除单个文档确认弹窗 ==================== -->
     <Teleport to="body">
@@ -617,6 +649,34 @@ function getFileIcon(extension) {
   background: var(--accent-primary);
   border-color: var(--accent-primary);
   color: white;
+}
+
+/* View Button */
+.doc-view-btn {
+  position: absolute;
+  top: 12px;
+  right: 72px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+  line-height: 1;
+  opacity: 0;
+}
+
+.doc-card:hover .doc-view-btn {
+  opacity: 1;
+}
+
+.doc-view-btn:hover {
+  background: rgba(99, 102, 241, 0.15);
 }
 
 /* Delete Button */

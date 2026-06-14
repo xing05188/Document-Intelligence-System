@@ -33,6 +33,8 @@ from db.library_repository import (
     get_library_spaces,
 )
 
+from utils.document_reader import read_document
+
 from uuid import uuid4
 
 
@@ -484,3 +486,63 @@ async def download_doc(
         filename=file_name,
         media_type=mime_type,
     )
+
+
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico'}
+
+
+@router.get("/docs/{doc_id}/preview")
+async def preview_doc(
+    doc_id: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    """预览文档内容（文本提取预览）"""
+    cfg = load_config()
+    user = _resolve_user(authorization, cfg)
+
+    doc = get_library_doc_by_id(doc_id, config=cfg, user_id=user.id if user else None)
+    if not doc:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    storage_key = doc.storage_key
+    blob_url = doc.blob_url
+    file_name = doc.file_name
+    file_ext = Path(file_name).suffix.lower()
+
+    # 解析文件路径（同 download 逻辑）
+    file_path = None
+    if storage_key and cfg.storage.enabled:
+        cache_path = Path(cfg.temp_dir) / "azure_blob_cache" / storage_key
+        try:
+            file_path = download_file_to_local(storage_key, cache_path, config=cfg)
+        except Exception:
+            pass
+    if not file_path and blob_url:
+        local_path = Path(blob_url)
+        if local_path.exists():
+            file_path = local_path
+    if not file_path and storage_key:
+        local_path = Path(storage_key)
+        if local_path.exists():
+            file_path = local_path
+    if not file_path:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    # 图片类型 → 返回类型信息，前端用 download URL 展示
+    if file_ext in IMAGE_EXTENSIONS:
+        return {
+            "id": doc_id,
+            "file_name": file_name,
+            "file_extension": file_ext,
+            "type": "image",
+        }
+
+    # 其他文档类型 → 提取文本
+    content = read_document(str(file_path))
+    return {
+        "id": doc_id,
+        "file_name": file_name,
+        "file_extension": file_ext,
+        "type": "text",
+        "content": content,
+    }

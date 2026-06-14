@@ -47,6 +47,11 @@ export default {
     return client.post('/library/docs/delete-batch', { doc_ids: docIds })
   },
 
+  /** 预览文档内容 */
+  previewDoc(docId) {
+    return client.get(`/library/docs/${docId}/preview`)
+  },
+
   /** 下载文档 */
   downloadDoc(docId, fileName) {
     const token = localStorage.getItem('auth_token') || ''

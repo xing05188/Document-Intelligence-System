@@ -20,17 +20,19 @@ const _mdCache = new Map()
 const _mdCacheMax = 200
 function cachedRenderMarkdown(content, cacheKey) {
   if (!content) return ''
-  if (cacheKey != null) {
-    const cached = _mdCache.get(cacheKey)
+  // 附加内容长度作为 cacheKey 的一部分，使流式追加内容时自动穿透缓存
+  const effectiveKey = cacheKey != null ? `${cacheKey}_${content.length}` : null
+  if (effectiveKey != null) {
+    const cached = _mdCache.get(effectiveKey)
     if (cached !== undefined) return cached
   }
   const html = marked.parse(content)
-  if (cacheKey != null) {
+  if (effectiveKey != null) {
     if (_mdCache.size >= _mdCacheMax) {
       const firstKey = _mdCache.keys().next().value
       _mdCache.delete(firstKey)
     }
-    _mdCache.set(cacheKey, html)
+    _mdCache.set(effectiveKey, html)
   }
   return html
 }

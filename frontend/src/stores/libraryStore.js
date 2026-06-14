@@ -102,6 +102,27 @@ export const useLibraryStore = defineStore('library', () => {
     }
   }
 
+  async function renameSpace(spaceId, data) {
+    error.value = null
+    try {
+      const res = await libraryApi.updateSpace(spaceId, data)
+      const idx = spaces.value.findIndex(s => s.id === spaceId)
+      if (idx !== -1) {
+        spaces.value[idx] = {
+          ...spaces.value[idx],
+          name: res.name || spaces.value[idx].name,
+          icon: res.icon || spaces.value[idx].icon,
+          description: res.description ?? spaces.value[idx].description,
+          updated_at: res.updated_at,
+        }
+      }
+      return res
+    } catch (e) {
+      error.value = e.message || '重命名空间失败'
+      throw e
+    }
+  }
+
   function selectSpace(spaceId, forceRefresh = false) {
     if (currentSpaceId.value === spaceId && !forceRefresh) return
     currentSpaceId.value = spaceId
@@ -294,6 +315,7 @@ export const useLibraryStore = defineStore('library', () => {
     // 空间操作
     loadSpaces,
     createSpace,
+    renameSpace,
     deleteSpace,
     selectSpace,
     // 文档操作

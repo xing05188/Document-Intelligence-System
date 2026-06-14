@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 export const useTabStore = defineStore('tab', () => {
-  const currentTab = ref('library')
+  const currentTab = ref('chat')
 
   const tabs = [
     { id: 'library', label: '文档库', icon: 'book' },
