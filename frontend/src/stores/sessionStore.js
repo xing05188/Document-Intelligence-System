@@ -232,6 +232,37 @@ export const useSessionStore = defineStore('session', () => {
   // SSE 任务完成回调（混合模式用于追踪单个子任务完成）
   let _sseDoneCallback = null
 
+  // 流式输出渲染节流：缓冲累积的 chunk 内容，定期刷新到视图
+  let _streamBuffer = ''
+  let _flushHandle = null
+  const FLUSH_INTERVAL_MS = 50
+
+  function flushStreamBuffer() {
+    _flushHandle = null
+    if (!_streamBuffer) return
+    const content = _streamBuffer
+    _streamBuffer = ''
+    const lastMsg = messages.value[messages.value.length - 1]
+    if (lastMsg && lastMsg.role === 'assistant') {
+      lastMsg.content += content
+    }
+  }
+
+  function scheduleFlush() {
+    if (_flushHandle) return
+    _flushHandle = setTimeout(() => {
+      flushStreamBuffer()
+    }, FLUSH_INTERVAL_MS)
+  }
+
+  function flushImmediate() {
+    if (_flushHandle) {
+      clearTimeout(_flushHandle)
+      _flushHandle = null
+    }
+    flushStreamBuffer()
+  }
+
   // 模式相关
   const currentMode = ref('default_conversation')
   const modeConfig = {
@@ -616,6 +647,12 @@ export const useSessionStore = defineStore('session', () => {
       onError: () => {
         console.warn('[SSE] 连接错误, sessionId:', sseSessionId.value)
         sseSessionId.value = null
+        // SSE 连接断开时确保 isStreaming 被重置，防止 UI 卡死
+        if (isStreaming.value) {
+          console.warn('[SSE] 连接错误，重置 isStreaming')
+          isStreaming.value = false
+          showProgressBar.value = false
+        }
       },
     })
   }
@@ -707,56 +744,76 @@ export const useSessionStore = defineStore('session', () => {
           console.error('[SSE] 解析表格填表结果失败:', e)
         }
       } else {
-        // 普通流式文本
-        const lastMsg = messages.value[messages.value.length - 1]
-        if (lastMsg && lastMsg.role === 'assistant') {
-          lastMsg.content += data.content
-        } else {
+        // 普通流式文本（使用节流缓冲，避免频繁触发 Vue 更新）
+        _streamBuffer += data.content
+        if (!messages.value.length || messages.value[messages.value.length - 1].role !== 'assistant') {
           messages.value.push({
-            id: createMessageId('assistant'),
-            role: 'assistant',
-            content: data.content,
-            created_at: new Date().toISOString(),
-          })
-        }
-      }
-    } else if (data.type === 'done') {
-      console.log('[SSE] type=done, generated_files:', data.generated_files)
-      isStreaming.value = false
-      showProgressBar.value = false
-      progressValue.value = 100
-      progressMessage.value = '处理完成'
-      const normalizedDoneFiles = normalizeGeneratedFiles(
-        data.generated_files || data.generatedFiles || data.output_files
-      )
-      // 把 generated_files 存入最后一条助手消息
-      if (normalizedDoneFiles.length > 0) {
-        let lastMsg = messages.value[messages.value.length - 1]
-        if (!lastMsg || lastMsg.role !== 'assistant') {
-          lastMsg = {
             id: createMessageId('assistant'),
             role: 'assistant',
             content: '',
             created_at: new Date().toISOString(),
-          }
-          messages.value.push(lastMsg)
+          })
         }
-        lastMsg.generated_files = normalizedDoneFiles
-        if (lastMsg.tableFillingData && typeof lastMsg.tableFillingData === 'object') {
-          lastMsg.tableFillingData.generated_files = normalizedDoneFiles
-        }
+        scheduleFlush()
       }
-      if (currentSessionId.value) {
-        saveMessagesCache(currentSessionId.value, messages.value)
-        loadMessages(currentSessionId.value).catch(e =>
-          console.warn('[SSE done] 同步服务端消息失败:', e.message)
+    } else if (data.type === 'done') {
+      console.log('[SSE] type=done, generated_files:', data.generated_files)
+      // 先刷新所有缓冲的内容，确保最后一段文本不会丢失
+      flushImmediate()
+      // 必须在任何可能出错的操作之前设置 isStreaming = false，确保 UI 不被卡死
+      isStreaming.value = false
+      showProgressBar.value = false
+      progressValue.value = 100
+      progressMessage.value = '处理完成'
+
+      try {
+        const normalizedDoneFiles = normalizeGeneratedFiles(
+          data.generated_files || data.generatedFiles || data.output_files
         )
+        // 把 generated_files 存入最后一条助手消息
+        if (normalizedDoneFiles.length > 0) {
+          let lastMsg = messages.value[messages.value.length - 1]
+          if (!lastMsg || lastMsg.role !== 'assistant') {
+            lastMsg = {
+              id: createMessageId('assistant'),
+              role: 'assistant',
+              content: '',
+              created_at: new Date().toISOString(),
+            }
+            messages.value.push(lastMsg)
+          }
+          lastMsg.generated_files = normalizedDoneFiles
+          if (lastMsg.tableFillingData && typeof lastMsg.tableFillingData === 'object') {
+            lastMsg.tableFillingData.generated_files = normalizedDoneFiles
+          }
+        }
+        // 清除加载状态标记，用于停止打字动画
+        const lastAssistantMsg = messages.value[messages.value.length - 1]
+        if (lastAssistantMsg && lastAssistantMsg.role === 'assistant') {
+          lastAssistantMsg.isLoading = false
+        }
+        if (currentSessionId.value) {
+          saveMessagesCache(currentSessionId.value, messages.value)
+          // 仅当 SSE 流式内容为空时才回退到 REST API 刷新（避免不必要的数据替换）
+          const last = messages.value[messages.value.length - 1]
+          const needsServerRefresh = !last || last.role !== 'assistant' || !last.content
+          if (needsServerRefresh) {
+            loadMessages(currentSessionId.value).catch(e =>
+              console.warn('[SSE done] 同步服务端消息失败:', e.message)
+            )
+          }
+        }
+      } catch (e) {
+        console.error('[SSE] done 事件处理异常:', e)
       }
+
       if (_sseDoneCallback) {
         _sseDoneCallback({ success: true, data })
         _sseDoneCallback = null
       }
-    } else if (data.type === 'error') {
+      } else if (data.type === 'error') {
+      // 刷新缓冲内容后处理错误
+      flushImmediate()
       const errorMsg = typeof data.message === 'string' ? data.message : JSON.stringify(data.message)
       console.error('[SSE] type=error:', errorMsg)
       isStreaming.value = false

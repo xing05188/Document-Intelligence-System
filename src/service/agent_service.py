@@ -472,13 +472,8 @@ class AgentService:
                 break
             text = _chunk_to_text(chunk)
             if text:
-                # 将 LLM chunk 拆成小片段逐批 yield，避免因 provider 批量发送导致前端停顿
-                pos = 0
-                while pos < len(text):
-                    end = pos + 5
-                    yield text[pos:end]
-                    pos = end
-                    await asyncio.sleep(0.004)
+                yield text
+                await asyncio.sleep(0)
 
     def execute_task(
         self,

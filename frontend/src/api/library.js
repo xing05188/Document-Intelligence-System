@@ -63,6 +63,31 @@ export default {
     a.click()
   },
 
+  /** 以 Blob 形式获取 PDF 预览（浏览器原生渲染）
+   *  PDF 直接返回；docx/xlsx 等后端自动转换为 PDF */
+  async previewDocAsPdf(docId) {
+    const token = localStorage.getItem('access_token') || ''
+    const baseUrl = import.meta.env.VITE_API_BASE_URL || ''
+    const url = `${baseUrl}/api/library/docs/${docId}/preview-pdf`
+    const res = await fetch(url, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+    if (!res.ok) throw new Error(`预览失败 (${res.status})`)
+    return res.blob()
+  },
+
+  /** 以 Blob 形式获取文档（用于前端预览二进制格式：PDF/DOCX/XLSX） */
+  async downloadDocBlob(docId) {
+    const token = localStorage.getItem('access_token') || ''
+    const baseUrl = import.meta.env.VITE_API_BASE_URL || ''
+    const url = `${baseUrl}/api/library/docs/${docId}/download`
+    const res = await fetch(url, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+    if (!res.ok) throw new Error(`下载失败 (${res.status})`)
+    return res.blob()
+  },
+
   /** 将生成的文件保存到文档库 */
   saveGeneratedFile(spaceId, data) {
     return client.post('/library/save-generated', { space_id: spaceId, ...data })

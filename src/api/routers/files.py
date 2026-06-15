@@ -245,7 +245,7 @@ async def update_file_selections(
 
 
 @router.delete("/{file_id}")
-async def delete_file(session_id: str, file_id: int, authorization: Optional[str] = Header(default=None)):
+async def delete_file(session_id: str, file_id: str, authorization: Optional[str] = Header(default=None)):
     """删除文件"""
     cfg = load_config()
     current_user = _resolve_current_user(authorization, cfg)
@@ -257,7 +257,16 @@ async def delete_file(session_id: str, file_id: int, authorization: Optional[str
     
     # 获取文件信息（用于删除物理文件）
     files = get_session_files(session_id, config=cfg, user_id=current_user.id if current_user else None)
-    file_info = next((f for f in files if f.id == file_id), None)
+    file_info = None
+    try:
+        fid = int(file_id)
+        file_info = next((f for f in files if f.id == fid), None)
+    except ValueError:
+        pass
+    if not file_info:
+        file_info = next((f for f in files if (getattr(f, "storage_key", None) or "") == file_id), None)
+    if not file_info:
+        file_info = next((f for f in files if (getattr(f, "file_path", None) or "") == file_id), None)
     
     if not file_info:
         raise HTTPException(status_code=404, detail="文件不存在")
@@ -274,13 +283,24 @@ async def delete_file(session_id: str, file_id: int, authorization: Optional[str
 
 
 @router.get("/{file_id}/download")
-async def download_file(session_id: str, file_id: int, authorization: Optional[str] = Header(default=None)):
+async def download_file(session_id: str, file_id: str, authorization: Optional[str] = Header(default=None)):
     """下载文件"""
     cfg = load_config()
     current_user = _resolve_current_user(authorization, cfg)
 
     files = get_session_files(session_id, config=cfg, user_id=current_user.id if current_user else None)
-    file_info = next((f for f in files if f.id == file_id), None)
+
+    # 尝试匹配：int(id) 或 storage_key
+    file_info = None
+    try:
+        fid = int(file_id)
+        file_info = next((f for f in files if f.id == fid), None)
+    except ValueError:
+        pass
+    if not file_info:
+        file_info = next((f for f in files if (getattr(f, "storage_key", None) or "") == file_id), None)
+    if not file_info:
+        file_info = next((f for f in files if (getattr(f, "file_path", None) or "") == file_id), None)
 
     if not file_info:
         raise HTTPException(status_code=404, detail="文件不存在")

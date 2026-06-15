@@ -376,7 +376,12 @@ function closeRenameModal() {
 </template>
 
 <style scoped>
-/* Sidebar */
+/* =============================================================
+   LibrarySidebar.vue — 全面优化侧栏样式
+   设计系统使用 theme.css CSS 自定义属性
+   ============================================================= */
+
+/* ---- Sidebar ---- */
 .library-sidebar {
   width: 280px;
   background: var(--bg-secondary);
@@ -385,8 +390,10 @@ function closeRenameModal() {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
 }
 
+/* ---- Space Section ---- */
 .space-section {
   margin-bottom: 24px;
 }
@@ -395,39 +402,41 @@ function closeRenameModal() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+  padding: 0 2px;
 }
 
 .space-title {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 1.2px;
   color: var(--text-muted);
 }
 
 .space-action {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--text-muted);
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 400;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
+  line-height: 1;
 }
 
 .space-action:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+  background: var(--accent-primary-light);
+  color: var(--accent-primary);
 }
 
-/* Space Item */
+/* ---- Space Items ---- */
 .space-item {
   display: flex;
   align-items: center;
@@ -435,25 +444,39 @@ function closeRenameModal() {
   padding: 10px 12px;
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   color: var(--text-secondary);
   margin-bottom: 2px;
   position: relative;
+  border: 1px solid transparent;
 }
 
 .space-item:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+  border-color: var(--border-color);
 }
 
 .space-item.active {
-  background: rgba(99, 102, 241, 0.15);
+  background: var(--accent-primary-light);
   color: var(--accent-primary);
+  border-color: rgba(99, 102, 241, 0.15);
+  box-shadow: 0 1px 4px rgba(99, 102, 241, 0.08);
+}
+
+.space-item.active .space-name {
+  font-weight: 600;
 }
 
 .space-icon {
   font-size: 18px;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.space-item.active .space-icon {
+  color: var(--accent-primary);
 }
 
 .space-name {
@@ -472,45 +495,40 @@ function closeRenameModal() {
   padding: 2px 8px;
   border-radius: 10px;
   flex-shrink: 0;
+  font-weight: 500;
 }
 
+.space-item.active .space-count {
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--accent-primary);
+}
+
+/* ---- Action Buttons (hover reveal) ---- */
+.space-rename-btn,
 .space-delete-btn {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--text-muted);
-  font-size: 16px;
-  font-weight: 400;
-  transition: all 0.2s;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s ease;
   flex-shrink: 0;
+  opacity: 0;
+  transform: scale(0.85);
+  line-height: 1;
 }
 
-.space-delete-btn:hover {
-  background: rgba(239, 68, 68, 0.15);
-  color: var(--accent-danger);
-}
-
-.space-rename-btn {
-  width: 20px;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--text-muted);
-  font-size: 16px;
-  font-weight: 400;
-  transition: all 0.2s;
-  flex-shrink: 0;
+.space-item:hover .space-rename-btn,
+.space-item:hover .space-delete-btn {
+  opacity: 1;
+  transform: scale(1);
 }
 
 .space-rename-btn:hover {
@@ -518,11 +536,16 @@ function closeRenameModal() {
   color: var(--accent-primary);
 }
 
-/* Loading & Empty */
+.space-delete-btn:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+/* ---- Loading ---- */
 .spaces-loading {
   display: flex;
   justify-content: center;
-  padding: 20px 0;
+  padding: 28px 0;
 }
 
 .loading-dots {
@@ -531,8 +554,8 @@ function closeRenameModal() {
 }
 
 .loading-dots span {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   background: var(--accent-primary);
   border-radius: 50%;
   animation: bounce-dot 1.4s ease-in-out infinite;
@@ -546,18 +569,20 @@ function closeRenameModal() {
   40% { transform: scale(1); opacity: 1; }
 }
 
+/* ---- Empty State ---- */
 .spaces-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  padding: 24px 0;
+  padding: 32px 12px;
   color: var(--text-muted);
+  text-align: center;
 }
 
 .spaces-empty .empty-icon {
-  font-size: 32px;
-  opacity: 0.5;
+  opacity: 0.4;
+  margin-bottom: 4px;
 }
 
 .spaces-empty p {
@@ -566,29 +591,38 @@ function closeRenameModal() {
 }
 
 .empty-create-btn {
-  margin-top: 8px;
-  padding: 8px 16px;
-  background: rgba(99, 102, 241, 0.1);
-  border: 1px solid rgba(99, 102, 241, 0.3);
+  margin-top: 12px;
+  padding: 9px 18px;
+  background: var(--accent-primary-light);
+  border: 1px solid rgba(99, 102, 241, 0.25);
   border-radius: var(--radius-md);
   font-size: 13px;
+  font-weight: 600;
   color: var(--accent-primary);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.25s ease;
+  font-family: inherit;
 }
 
 .empty-create-btn:hover {
-  background: rgba(99, 102, 241, 0.2);
+  background: var(--accent-primary);
+  color: white;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
 }
 
-/* ============ 弹窗样式 ============ */
+/* =============================================================
+   Modal Styles (Modal Overlay & Modal)
+   ============================================================= */
 .modal-overlay {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.75);
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -608,19 +642,20 @@ function closeRenameModal() {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-xl);
   width: 480px;
-  max-width: 90vw;
+  max-width: 92vw;
   max-height: 85vh;
   display: flex;
   flex-direction: column;
-  transform: scale(0.9) translateY(20px);
-  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  transform: scale(0.92) translateY(24px);
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
 }
 
 .modal-overlay.active .modal {
   transform: scale(1) translateY(0);
 }
 
+/* ---- Modal Header ---- */
 .modal-header {
   display: flex;
   align-items: center;
@@ -648,7 +683,7 @@ function closeRenameModal() {
   font-size: 22px;
   color: var(--text-muted);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   line-height: 1;
 }
 
@@ -657,6 +692,7 @@ function closeRenameModal() {
   color: var(--text-primary);
 }
 
+/* ---- Modal Body ---- */
 .modal-body {
   flex: 1;
   padding: 24px;
@@ -668,14 +704,15 @@ function closeRenameModal() {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
   border-radius: var(--radius-md);
   font-size: 13px;
   color: #ef4444;
   margin-bottom: 20px;
 }
 
+/* ---- Modal Footer ---- */
 .modal-footer {
   display: flex;
   justify-content: flex-end;
@@ -685,7 +722,7 @@ function closeRenameModal() {
   flex-shrink: 0;
 }
 
-/* Form Styles */
+/* ---- Form Fields ---- */
 .form-field {
   margin-bottom: 20px;
 }
@@ -716,8 +753,9 @@ function closeRenameModal() {
   font-size: 14px;
   color: var(--text-primary);
   outline: none;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   font-family: inherit;
+  box-sizing: border-box;
 }
 
 .form-input::placeholder {
@@ -726,7 +764,8 @@ function closeRenameModal() {
 
 .form-input:focus {
   border-color: var(--accent-primary);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+  background: var(--bg-primary);
 }
 
 .form-textarea {
@@ -740,9 +779,10 @@ function closeRenameModal() {
   outline: none;
   resize: vertical;
   min-height: 80px;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   font-family: inherit;
   line-height: 1.5;
+  box-sizing: border-box;
 }
 
 .form-textarea::placeholder {
@@ -751,10 +791,11 @@ function closeRenameModal() {
 
 .form-textarea:focus {
   border-color: var(--accent-primary);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+  background: var(--bg-primary);
 }
 
-/* Icon Grid */
+/* ---- Icon Grid ---- */
 .icon-grid {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
@@ -770,30 +811,34 @@ function closeRenameModal() {
   background: var(--bg-tertiary);
   border: 2px solid var(--border-color);
   border-radius: var(--radius-md);
-  font-size: 20px;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
+  color: var(--text-secondary);
 }
 
 .icon-btn:hover {
   background: var(--bg-hover);
   border-color: var(--border-color-hover);
   transform: scale(1.1);
+  color: var(--text-primary);
+  z-index: 1;
 }
 
 .icon-btn.selected {
-  background: rgba(99, 102, 241, 0.2);
+  background: rgba(99, 102, 241, 0.15);
   border-color: var(--accent-primary);
-  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.3);
+  color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
 }
 
-/* Confirm Box */
+/* ---- Confirm Box ---- */
 .confirm-box {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 12px;
   text-align: center;
+  padding: 8px 0;
 }
 
 .confirm-icon {
@@ -804,13 +849,13 @@ function closeRenameModal() {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 28px;
 }
 
 .confirm-text {
   font-size: 15px;
   color: var(--text-primary);
   line-height: 1.6;
+  margin: 0;
 }
 
 .confirm-text strong {
@@ -821,16 +866,17 @@ function closeRenameModal() {
   font-size: 13px;
   color: var(--text-muted);
   line-height: 1.6;
+  margin: 0;
 }
 
-/* Modal Buttons */
+/* ---- Modal Buttons ---- */
 .modal-btn {
   padding: 10px 24px;
   border-radius: var(--radius-md);
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   font-family: inherit;
   min-width: 100px;
   display: flex;
@@ -848,6 +894,7 @@ function closeRenameModal() {
 .modal-btn.cancel:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+  border-color: var(--border-color-hover);
 }
 
 .modal-btn.primary {
@@ -858,7 +905,7 @@ function closeRenameModal() {
 
 .modal-btn.primary:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.35);
 }
 
 .modal-btn.primary:disabled {
@@ -867,14 +914,15 @@ function closeRenameModal() {
 }
 
 .modal-btn.danger {
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.25);
   color: #ef4444;
 }
 
 .modal-btn.danger:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.2);
   transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25);
 }
 
 .modal-btn.danger:disabled {
@@ -882,7 +930,7 @@ function closeRenameModal() {
   cursor: not-allowed;
 }
 
-/* Spinner */
+/* ---- Button Spinner ---- */
 .btn-spinner {
   display: inline-block;
   width: 16px;
@@ -890,10 +938,53 @@ function closeRenameModal() {
   border: 2px solid rgba(255, 255, 255, 0.3);
   border-top-color: white;
   border-radius: 50%;
-  animation: spin 0.7s linear infinite;
+  animation: btn-spin 0.7s linear infinite;
 }
 
-@keyframes spin {
+@keyframes btn-spin {
   to { transform: rotate(360deg); }
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 768px) {
+  .library-sidebar {
+    width: 240px;
+    padding: 16px;
+  }
+
+  .modal {
+    width: 420px;
+  }
+
+  .icon-grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
+}
+
+@media (max-width: 480px) {
+  .library-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+    max-height: 200px;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 100vw;
+    max-height: 100vh;
+    border-radius: var(--radius-lg);
+    margin: 12px;
+  }
+
+  .icon-grid {
+    grid-template-columns: repeat(5, 1fr);
+  }
+
+  .modal-header,
+  .modal-body,
+  .modal-footer {
+    padding: 16px;
+  }
 }
 </style>

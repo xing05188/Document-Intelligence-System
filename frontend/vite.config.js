@@ -15,4 +15,16 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'excel-vendor': ['xlsx'],
+          'md-vendor': ['marked', 'highlight.js'],
+          'docx-vendor': ['mammoth'],
+        },
+      },
+    },
+    chunkSizeWarningLimit: 600,
+  },
 })

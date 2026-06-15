@@ -1,7 +1,12 @@
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import libraryApi from '../../api/library'
 import SvgIcon from '../icons/SvgIcon.vue'
+import MarkdownRenderer from './MarkdownRenderer.vue'
+import JsonRenderer from './JsonRenderer.vue'
+import DocxRenderer from './DocxRenderer.vue'
+import PdfRenderer from './PdfRenderer.vue'
+import ExcelRenderer from './ExcelRenderer.vue'
 
 const props = defineProps({
   doc: { type: Object, default: null },
@@ -13,6 +18,31 @@ const emit = defineEmits(['close'])
 const loading = ref(false)
 const error = ref('')
 const previewData = ref(null)
+const fileBlob = ref(null)
+
+// 判断文档类型
+const docType = computed(() => {
+  if (!props.doc) return 'unknown'
+  const ext = (props.doc.file_extension || '').toLowerCase().replace(/^\./, '')
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'].includes(ext)) return 'image'
+  if (ext === 'md') return 'markdown'
+  if (ext === 'json') return 'json'
+  if (ext === 'txt') return 'text'
+  if (['docx', 'doc'].includes(ext)) return 'docx'
+  if (['xlsx', 'xls'].includes(ext)) return 'excel'
+  if (ext === 'pdf') return 'pdf'
+  return 'unknown'
+})
+
+// 是否为二进制格式（docx/excel 直接从 download 获取 blob）
+const isBinaryFormat = computed(() => {
+  return ['docx', 'excel'].includes(docType.value)
+})
+
+// PDF 是否需走 /preview-pdf 转换
+const isPdfFormat = computed(() => {
+  return docType.value === 'pdf'
+})
 
 function getDownloadUrl(docId) {
   const baseUrl = import.meta.env.VITE_API_BASE_URL || ''
@@ -21,6 +51,7 @@ function getDownloadUrl(docId) {
 
 function handleClose() {
   previewData.value = null
+  fileBlob.value = null
   emit('close')
 }
 
@@ -34,9 +65,22 @@ async function loadPreview() {
   loading.value = true
   error.value = ''
   previewData.value = null
+  fileBlob.value = null
+
   try {
+    if (docType.value === 'pdf') {
+      // PDF → 调用 /preview-pdf 端点（直接返回 PDF 流）
+      const res = await libraryApi.previewDocAsPdf(props.doc.id)
+      fileBlob.value = res
+    } else if (isBinaryFormat.value) {
+      // docx/excel → 从 download 端点获取原始 blob，用各自渲染器
+      const res = await libraryApi.downloadDocBlob(props.doc.id)
+      fileBlob.value = res
+    } else {
+      // 文本格式 → 从 preview 端点获取文本
       const res = await libraryApi.previewDoc(props.doc.id)
       previewData.value = res
+    }
   } catch (e) {
     error.value = e.message || '预览加载失败'
   } finally {
@@ -44,37 +88,17 @@ async function loadPreview() {
   }
 }
 
-function renderMarkdown(text) {
-  if (!text) return ''
-  let html = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/^#### (.+)$/gm, '<h4>$1</h4>')
-    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
-    .replace(/`(.+?)`/g, '<code>$1</code>')
-    .replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-    .replace(/^- (.+)$/gm, '<li>$1</li>')
-    .replace(/\n\n/g, '</p><p>')
-    .replace(/\n/g, '<br>')
-  return '<p>' + html + '</p>'
-}
-
 function getFileLabel(ext) {
+  const key = (ext || '').toLowerCase().replace(/^\./, '')
   const labels = {
-    '.txt': '纯文本', '.md': 'Markdown', '.pdf': 'PDF',
-    '.docx': 'Word', '.doc': 'Word',
-    '.xlsx': 'Excel', '.xls': 'Excel',
-    '.png': '图片', '.jpg': '图片', '.jpeg': '图片',
-    '.gif': '图片', '.webp': '图片', '.svg': '图片',
-    '.bmp': '图片', '.ico': '图片',
+    'txt': '纯文本', 'md': 'Markdown', 'json': 'JSON', 'pdf': 'PDF',
+    'docx': 'Word', 'doc': 'Word',
+    'xlsx': 'Excel', 'xls': 'Excel',
+    'png': '图片', 'jpg': '图片', 'jpeg': '图片',
+    'gif': '图片', 'webp': '图片', 'svg': '图片',
+    'bmp': '图片', 'ico': '图片',
   }
-  return labels[ext] || '文档'
+  return labels[key] || '文档'
 }
 </script>
 
@@ -107,7 +131,7 @@ function getFileLabel(ext) {
           </div>
 
           <!-- Image Preview -->
-          <div v-else-if="previewData?.type === 'image'" class="preview-image-container">
+          <div v-else-if="docType === 'image'" class="preview-image-container">
             <img
               :src="getDownloadUrl(doc.id)"
               :alt="doc?.name"
@@ -116,19 +140,37 @@ function getFileLabel(ext) {
             />
           </div>
 
-          <!-- Text Preview -->
-          <div v-else-if="previewData?.type === 'text'" class="preview-text-container">
-            <!-- Markdown rendered -->
-            <div
-              v-if="doc?.file_extension === '.md'"
-              class="preview-markdown"
-              v-html="renderMarkdown(previewData.content)"
-            ></div>
-            <!-- Plain text -->
-            <pre v-else class="preview-text">{{ previewData.content }}</pre>
+          <!-- Markdown Preview -->
+          <div v-else-if="docType === 'markdown' && previewData?.content" class="preview-renderer-wrapper">
+            <MarkdownRenderer :content="previewData.content" />
           </div>
 
-          <!-- No data -->
+          <!-- Plain Text Preview -->
+          <div v-else-if="docType === 'text' && previewData?.content" class="preview-text-container">
+            <pre class="preview-text">{{ previewData.content }}</pre>
+          </div>
+
+          <!-- JSON Preview -->
+          <div v-else-if="docType === 'json' && previewData?.content" class="preview-renderer-wrapper">
+            <JsonRenderer :content="previewData.content" />
+          </div>
+
+          <!-- Word Document Preview (原生渲染) -->
+          <div v-else-if="docType === 'docx' && fileBlob" class="preview-renderer-wrapper">
+            <DocxRenderer :blob="fileBlob" />
+          </div>
+
+          <!-- PDF Preview (浏览器原生渲染) -->
+          <div v-else-if="docType === 'pdf' && fileBlob" class="preview-renderer-wrapper">
+            <PdfRenderer :blob="fileBlob" />
+          </div>
+
+          <!-- Excel Preview (原生渲染) -->
+          <div v-else-if="docType === 'excel' && fileBlob" class="preview-renderer-wrapper">
+            <ExcelRenderer :blob="fileBlob" />
+          </div>
+
+          <!-- No data / Unknown type -->
           <div v-else-if="!loading && !error" class="preview-empty">
             <span>无法预览此文件</span>
           </div>
@@ -136,7 +178,13 @@ function getFileLabel(ext) {
 
         <!-- Footer -->
         <div class="preview-footer">
-          <span class="preview-info">{{ previewData?.content?.length || 0 }} 字符</span>
+          <span class="preview-info" v-if="previewData?.content">
+            {{ previewData.content.length }} 字符
+          </span>
+          <span class="preview-info" v-else-if="fileBlob">
+            {{ (fileBlob.size / 1024).toFixed(1) }} KB
+          </span>
+          <span class="preview-info" v-else></span>
           <button class="preview-btn close-btn" @click="handleClose">关闭</button>
         </div>
       </div>
@@ -145,58 +193,76 @@ function getFileLabel(ext) {
 </template>
 
 <style scoped>
+/* =============================================================
+   DocPreview.vue — 统一预览弹窗
+   ============================================================= */
+
+/* ---- Overlay ---- */
 .preview-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   z-index: 1000;
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: center;
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
-  transition: opacity 0.25s ease;
-  padding: 24px;
+  transition: all 0.3s ease;
+  padding: 0;
 }
 
 .preview-overlay.active {
   opacity: 1;
+  visibility: visible;
   pointer-events: auto;
 }
 
+/* ---- Modal ---- */
 .preview-modal {
   background: var(--bg-primary);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-xl);
   width: 100%;
-  max-width: 960px;
-  max-height: 85vh;
+  max-width: 1400px;
+  max-height: 100vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.35);
   overflow: hidden;
+  transform: scale(0.95) translateY(20px);
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-/* Header */
+.preview-overlay.active .preview-modal {
+  transform: scale(1) translateY(0);
+}
+
+/* ---- Header ---- */
 .preview-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 24px;
+  padding: 20px 28px;
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
+  background: var(--bg-secondary);
 }
 
 .preview-header-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
 }
 
 .preview-filename {
   font-size: 16px;
   font-weight: 600;
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -205,94 +271,116 @@ function getFileLabel(ext) {
 .preview-badge {
   font-size: 11px;
   font-weight: 600;
-  padding: 2px 8px;
+  padding: 3px 10px;
   border-radius: 4px;
   background: var(--bg-tertiary);
   color: var(--text-muted);
   flex-shrink: 0;
+  border: 1px solid var(--border-color);
 }
 
 .preview-close {
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: transparent;
-  border: none;
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   cursor: pointer;
   color: var(--text-muted);
-  font-size: 22px;
-  font-weight: 300;
-  transition: all 0.2s;
+  font-size: 24px;
+  font-weight: 400;
+  transition: all 0.2s ease;
   flex-shrink: 0;
+  line-height: 1;
 }
 
 .preview-close:hover {
   background: var(--bg-hover);
+  border-color: var(--border-color);
   color: var(--text-primary);
 }
 
-/* Body */
+/* ---- Body ---- */
 .preview-body {
   flex: 1;
-  overflow-y: auto;
-  min-height: 300px;
-  max-height: 65vh;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-primary);
 }
 
-/* Loading */
+.preview-renderer-wrapper {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+/* ---- Loading State ---- */
 .preview-loading {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  padding: 80px 24px;
+  gap: 20px;
+  padding: 100px 24px;
   color: var(--text-muted);
+  flex: 1;
 }
 
 .loading-spinner {
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border: 3px solid var(--border-color);
   border-top-color: var(--accent-primary);
   border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+  animation: spin 0.75s linear infinite;
 }
 
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
 
-/* Error */
+/* ---- Error State ---- */
 .preview-error {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 80px 24px;
+  gap: 14px;
+  padding: 100px 24px;
   color: #ef4444;
+  font-size: 15px;
+  flex: 1;
 }
 
-/* Empty */
+/* ---- Empty State ---- */
 .preview-empty {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 80px 24px;
+  padding: 100px 24px;
   color: var(--text-muted);
+  font-size: 15px;
+  flex: 1;
 }
 
-/* Image */
+/* ---- Image Preview ---- */
 .preview-image-container {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  min-height: 300px;
+  padding: 28px;
+  min-height: 200px;
+  background: rgba(0, 0, 0, 0.02);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .preview-image {
@@ -300,102 +388,44 @@ function getFileLabel(ext) {
   max-height: 60vh;
   object-fit: contain;
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  transition: box-shadow 0.3s ease;
 }
 
-/* Text */
+.preview-image:hover {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+}
+
+/* ---- Text Preview ---- */
 .preview-text-container {
   padding: 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .preview-text {
   margin: 0;
-  padding: 20px 24px;
+  padding: 24px 28px;
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
   font-size: 13px;
-  line-height: 1.7;
+  line-height: 1.8;
   white-space: pre-wrap;
   word-wrap: break-word;
   overflow-x: auto;
   color: var(--text-primary);
+  tab-size: 2;
 }
 
-/* Markdown */
-.preview-markdown {
-  padding: 24px 32px;
-  font-size: 15px;
-  line-height: 1.8;
-  color: var(--text-primary);
-  max-width: 100%;
-}
-
-.preview-markdown :deep(h1),
-.preview-markdown :deep(h2),
-.preview-markdown :deep(h3),
-.preview-markdown :deep(h4) {
-  margin-top: 1.5em;
-  margin-bottom: 0.6em;
-  font-weight: 700;
-  line-height: 1.3;
-}
-
-.preview-markdown :deep(h1) { font-size: 1.6em; }
-.preview-markdown :deep(h2) { font-size: 1.35em; }
-.preview-markdown :deep(h3) { font-size: 1.2em; }
-.preview-markdown :deep(h4) { font-size: 1.1em; }
-
-.preview-markdown :deep(p) {
-  margin: 0.8em 0;
-}
-
-.preview-markdown :deep(code) {
-  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-  font-size: 0.9em;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: var(--bg-tertiary);
-}
-
-.preview-markdown :deep(pre) {
-  background: var(--bg-tertiary);
-  border-radius: var(--radius-md);
-  padding: 16px 20px;
-  overflow-x: auto;
-  margin: 1em 0;
-}
-
-.preview-markdown :deep(pre code) {
-  padding: 0;
-  background: none;
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.preview-markdown :deep(a) {
-  color: var(--accent-primary);
-  text-decoration: none;
-}
-
-.preview-markdown :deep(a:hover) {
-  text-decoration: underline;
-}
-
-.preview-markdown :deep(li) {
-  margin: 0.3em 0 0.3em 1.5em;
-}
-
-.preview-markdown :deep(strong) {
-  font-weight: 700;
-}
-
-/* Footer */
+/* ---- Footer ---- */
 .preview-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 24px;
+  padding: 14px 28px;
   border-top: 1px solid var(--border-color);
   flex-shrink: 0;
+  background: var(--bg-secondary);
 }
 
 .preview-info {
@@ -403,23 +433,105 @@ function getFileLabel(ext) {
   color: var(--text-muted);
 }
 
+/* Footer Button */
 .preview-btn {
   padding: 8px 20px;
   border-radius: var(--radius-md);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
+  font-family: inherit;
 }
 
-.preview-btn.close-btn {
+.close-btn {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
 }
 
-.preview-btn.close-btn:hover {
+.close-btn:hover {
   background: var(--bg-hover);
   border-color: var(--border-color-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+/* =============================================================
+   Responsive
+   ============================================================= */
+@media (max-width: 768px) {
+  .preview-overlay {
+    padding: 12px;
+  }
+
+  .preview-modal {
+    max-width: 100%;
+    max-height: 100vh;
+    border-radius: var(--radius-lg);
+  }
+
+  .preview-header {
+    padding: 14px 18px;
+  }
+
+  .preview-filename {
+    font-size: 14px;
+  }
+
+  .preview-body {
+    max-height: none;
+    min-height: 150px;
+  }
+
+  .preview-text {
+    padding: 16px 20px;
+    font-size: 12px;
+  }
+
+  .preview-image-container {
+    padding: 16px;
+  }
+
+  .preview-footer {
+    padding: 12px 20px;
+  }
+}
+
+@media (max-width: 480px) {
+  .preview-overlay {
+    padding: 0;
+  }
+
+  .preview-modal {
+    max-width: 100%;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+
+  .preview-header {
+    padding: 14px 16px;
+  }
+
+  .preview-header-left {
+    gap: 8px;
+  }
+
+  .preview-badge {
+    display: none;
+  }
+
+  .preview-text {
+    padding: 12px 16px;
+    font-size: 12px;
+  }
+
+  .preview-image-container {
+    padding: 12px;
+  }
+
+  .preview-footer {
+    padding: 10px 16px;
+  }
 }
 </style>

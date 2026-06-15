@@ -52,7 +52,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       ]
     },
     'schema-md-input': {
-      icon: 'fileDoc', iconClass: 'input',
+      icon: 'fileMd', iconClass: 'input',
       title: 'MD 输入', subtitle: '输入节点',
       fields: [
         { key: 'inputSource', label: '文档来源', type: 'select-source',
@@ -385,7 +385,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
           schema: null // 动态从 nodeSchemas 获取
         },
         {
-          icon: 'fileDoc', name: 'MD 输入', type: 'input', title: 'MD 输入', body: '导入 Markdown 文件',
+          icon: 'fileMd', name: 'MD 输入', type: 'input', title: 'MD 输入', body: '导入 Markdown 文件',
           schemaKey: 'schema-md-input',
           schema: null
         },

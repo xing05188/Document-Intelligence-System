@@ -59,7 +59,7 @@ function triggerUpload() {
   const input = document.createElement('input')
   input.type = 'file'
   input.multiple = true
-  input.accept = '.pdf,.doc,.docx,.xlsx,.xls,.txt,.md,.csv,.pptx,.ppt'
+  input.accept = '.pdf,.doc,.docx,.xlsx,.xls,.txt,.md,.json,.csv,.pptx,.ppt'
   input.onchange = handleFileSelect
   input.click()
 }
@@ -395,7 +395,11 @@ function getFileIcon(extension) {
 </template>
 
 <style scoped>
-/* Library Content */
+/* =============================================================
+   DocGrid.vue — 全面优化文档网格卡片样式
+   ============================================================= */
+
+/* ---- Library Content ---- */
 .library-content {
   flex: 1;
   padding: 24px 32px;
@@ -405,7 +409,7 @@ function getFileIcon(extension) {
   flex-direction: column;
 }
 
-/* Content Header */
+/* ---- Content Header ---- */
 .content-header {
   display: flex;
   align-items: center;
@@ -421,6 +425,7 @@ function getFileIcon(extension) {
   display: flex;
   align-items: center;
   gap: 10px;
+  color: var(--text-primary);
 }
 
 .upload-indicator {
@@ -431,6 +436,7 @@ function getFileIcon(extension) {
   padding: 4px 12px;
   border-radius: 12px;
   animation: pulse 1.5s ease-in-out infinite;
+  white-space: nowrap;
 }
 
 @keyframes pulse {
@@ -462,7 +468,7 @@ function getFileIcon(extension) {
   gap: 12px;
 }
 
-/* Buttons */
+/* ---- Action Buttons ---- */
 .lib-btn {
   display: flex;
   align-items: center;
@@ -475,29 +481,33 @@ function getFileIcon(extension) {
   font-weight: 500;
   color: var(--text-primary);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
+  font-family: inherit;
 }
 
 .lib-btn:hover {
   background: var(--bg-hover);
   border-color: var(--border-color-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
 }
 
 .lib-btn.danger-sm {
-  background: rgba(239, 68, 68, 0.1);
-  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.2);
   color: #ef4444;
 }
 
 .lib-btn.danger-sm:hover {
-  background: rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.35);
 }
 
-/* Drag Overlay */
+/* ---- Drag Overlay ---- */
 .drag-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(99, 102, 241, 0.08);
+  background: rgba(99, 102, 241, 0.06);
   border: 2px dashed var(--accent-primary);
   border-radius: var(--radius-xl);
   display: flex;
@@ -505,6 +515,12 @@ function getFileIcon(extension) {
   justify-content: center;
   z-index: 10;
   pointer-events: none;
+  animation: drag-fade-in 0.2s ease;
+}
+
+@keyframes drag-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .drag-inner {
@@ -515,8 +531,8 @@ function getFileIcon(extension) {
 }
 
 .drag-icon {
-  font-size: 64px;
   animation: bounce-up 0.6s ease-in-out infinite alternate;
+  color: var(--accent-primary);
 }
 
 @keyframes bounce-up {
@@ -530,7 +546,7 @@ function getFileIcon(extension) {
   color: var(--accent-primary);
 }
 
-/* Loading */
+/* ---- Loading State ---- */
 .docs-loading {
   display: flex;
   flex-direction: column;
@@ -554,7 +570,7 @@ function getFileIcon(extension) {
   to { transform: rotate(360deg); }
 }
 
-/* Empty State */
+/* ---- Empty State ---- */
 .docs-empty {
   display: flex;
   flex-direction: column;
@@ -563,12 +579,13 @@ function getFileIcon(extension) {
   flex: 1;
   gap: 12px;
   text-align: center;
+  padding: 40px 20px;
 }
 
 .docs-empty .empty-icon {
-  font-size: 72px;
-  opacity: 0.4;
+  opacity: 0.35;
   margin-bottom: 8px;
+  color: var(--text-muted);
 }
 
 .docs-empty h3 {
@@ -588,56 +605,65 @@ function getFileIcon(extension) {
   margin-top: 8px;
   font-size: 13px;
   color: var(--text-muted);
-  opacity: 0.7;
+  opacity: 0.6;
 }
 
-/* Document Grid */
+/* =============================================================
+   Document Grid — 卡片网格
+   ============================================================= */
 .doc-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 20px;
 }
 
-/* Document Card */
+/* ---- Document Card ---- */
 .doc-card {
   position: relative;
   background: var(--bg-card);
-  border: 2px solid var(--border-color);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
-  padding: 20px;
+  padding: 20px 20px 16px;
   cursor: pointer;
-  transition: all 0.25s ease;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
   user-select: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
 }
 
 .doc-card:hover {
-  border-color: var(--border-color-hover);
+  border-color: var(--accent-primary);
   transform: translateY(-4px);
-  box-shadow: var(--shadow-md);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.08);
 }
 
 .doc-card.selected {
   border-color: var(--accent-primary);
-  background: rgba(99, 102, 241, 0.06);
+  background: rgba(99, 102, 241, 0.04);
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.15), 0 4px 12px rgba(99, 102, 241, 0.06);
 }
 
-/* Checkbox */
+/* ---- Checkbox (top-left) ---- */
 .doc-checkbox {
   position: absolute;
   top: 12px;
   left: 12px;
   width: 22px;
   height: 22px;
-  background: var(--bg-tertiary);
+  background: var(--bg-primary);
   border: 2px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: 12px;
+  font-weight: 700;
   color: transparent;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   opacity: 0;
+  z-index: 2;
 }
 
 .doc-card:hover .doc-checkbox,
@@ -651,87 +677,78 @@ function getFileIcon(extension) {
   color: white;
 }
 
-/* View Button */
-.doc-view-btn {
+/* ---- Action Buttons (top-right, hover reveal) ---- */
+.doc-view-btn,
+.doc-delete-btn,
+.doc-download-btn {
   position: absolute;
-  top: 12px;
-  right: 72px;
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: transparent;
-  border: none;
-  border-radius: 4px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-  line-height: 1;
+  transition: all 0.2s ease;
+  z-index: 2;
   opacity: 0;
+  transform: scale(0.85);
 }
 
-.doc-card:hover .doc-view-btn {
+.doc-card:hover .doc-view-btn,
+.doc-card:hover .doc-delete-btn,
+.doc-card:hover .doc-download-btn {
   opacity: 1;
+  transform: scale(1);
+}
+
+.doc-view-btn {
+  top: 12px;
+  right: 82px;
+  font-size: 13px;
+  color: var(--text-muted);
 }
 
 .doc-view-btn:hover {
-  background: rgba(99, 102, 241, 0.15);
+  background: rgba(99, 102, 241, 0.12);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
 }
 
-/* Delete Button */
 .doc-delete-btn {
-  position: absolute;
   top: 12px;
-  right: 42px;
-  width: 22px;
-  height: 22px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--text-muted);
+  right: 48px;
   font-size: 18px;
-  font-weight: 300;
-  transition: all 0.2s;
+  color: var(--text-muted);
   line-height: 1;
 }
 
 .doc-delete-btn:hover {
-  background: rgba(239, 68, 68, 0.15);
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.3);
   color: #ef4444;
 }
 
-/* Download Button */
 .doc-download-btn {
-  position: absolute;
   top: 12px;
   right: 12px;
-  width: 22px;
-  height: 22px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--text-muted);
   font-size: 16px;
   font-weight: 700;
-  transition: all 0.2s;
+  color: var(--text-muted);
   line-height: 1;
 }
 
 .doc-download-btn:hover {
-  background: rgba(59, 130, 246, 0.15);
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.3);
   color: #3b82f6;
 }
 
 .doc-download-btn.downloading {
+  opacity: 1;
+  transform: scale(1);
   pointer-events: none;
 }
 
@@ -743,91 +760,100 @@ function getFileIcon(extension) {
   display: none;
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(59, 130, 246, 0.3);
+  border: 2px solid rgba(59, 130, 246, 0.2);
   border-top-color: #3b82f6;
   border-radius: 50%;
-  animation: spin 0.7s linear infinite;
+  animation: spin 0.6s linear infinite;
 }
 
-/* Doc Icon */
+/* ---- File Icon ---- */
 .doc-icon {
-  margin-bottom: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 64px;
+  height: 72px;
+  margin: 4px 0 6px;
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
 }
 
-.doc-icon :deep(svg) {
-  width: 56px;
-  height: 63px;
+.doc-card:hover .doc-icon {
+  transform: scale(1.08);
 }
 
-/* Doc Name */
+/* ---- File Name ---- */
 .doc-name {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  margin-bottom: 8px;
-  white-space: nowrap;
+  color: var(--text-primary);
+  text-align: center;
+  line-height: 1.4;
+  width: 100%;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
+  word-break: break-all;
 }
 
-/* Doc Meta */
+/* ---- Meta ---- */
 .doc-meta {
-  font-size: 12px;
-  color: var(--text-muted);
   display: flex;
-  justify-content: space-between;
+  justify-content: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  width: 100%;
 }
 
-/* Upload Progress Bar */
+.doc-meta span {
+  white-space: nowrap;
+}
+
+/* ---- Upload Progress Bar ---- */
 .upload-progress-bar {
-  position: fixed;
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 8px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-lg);
-  padding: 16px 24px;
-  box-shadow: var(--shadow-lg);
-  z-index: 100;
-  min-width: 300px;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
 }
 
 .progress-track {
-  width: 100%;
+  flex: 1;
   height: 6px;
   background: var(--bg-tertiary);
-  border-radius: 3px;
+  border-radius: 4px;
   overflow: hidden;
 }
 
 .progress-fill {
   height: 100%;
   background: var(--gradient-primary);
-  border-radius: 3px;
+  border-radius: 4px;
   transition: width 0.3s ease;
 }
 
 .progress-text {
-  font-size: 13px;
-  color: var(--text-secondary);
-  font-weight: 500;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  min-width: 130px;
+  text-align: right;
 }
 
-/* ============ 弹窗样式 ============ */
+/* =============================================================
+   Modal Styles (delete modals)
+   ============================================================= */
 .modal-overlay {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.75);
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -846,13 +872,14 @@ function getFileIcon(extension) {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-xl);
-  width: 440px;
-  max-width: 90vw;
+  width: 420px;
+  max-width: 92vw;
+  max-height: 85vh;
   display: flex;
   flex-direction: column;
-  transform: scale(0.9) translateY(20px);
-  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  transform: scale(0.92) translateY(24px);
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
 }
 
 .modal-overlay.active .modal {
@@ -865,6 +892,7 @@ function getFileIcon(extension) {
   justify-content: space-between;
   padding: 20px 24px;
   border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
 }
 
 .modal-title {
@@ -885,7 +913,7 @@ function getFileIcon(extension) {
   font-size: 22px;
   color: var(--text-muted);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   line-height: 1;
 }
 
@@ -895,7 +923,9 @@ function getFileIcon(extension) {
 }
 
 .modal-body {
+  flex: 1;
   padding: 24px;
+  overflow-y: auto;
 }
 
 .modal-error {
@@ -903,8 +933,8 @@ function getFileIcon(extension) {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
   border-radius: var(--radius-md);
   font-size: 13px;
   color: #ef4444;
@@ -917,6 +947,7 @@ function getFileIcon(extension) {
   gap: 12px;
   padding: 16px 24px;
   border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
 }
 
 /* Confirm Box */
@@ -926,6 +957,7 @@ function getFileIcon(extension) {
   align-items: center;
   gap: 12px;
   text-align: center;
+  padding: 8px 0;
 }
 
 .confirm-icon {
@@ -936,7 +968,6 @@ function getFileIcon(extension) {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 28px;
 }
 
 .batch-icon {
@@ -968,7 +999,7 @@ function getFileIcon(extension) {
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   font-family: inherit;
   min-width: 100px;
   display: flex;
@@ -986,17 +1017,19 @@ function getFileIcon(extension) {
 .modal-btn.cancel:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+  border-color: var(--border-color-hover);
 }
 
 .modal-btn.danger {
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.2);
   color: #ef4444;
 }
 
 .modal-btn.danger:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.2);
   transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2);
 }
 
 .modal-btn.danger:disabled {
@@ -1012,10 +1045,78 @@ function getFileIcon(extension) {
   border: 2px solid rgba(255, 255, 255, 0.3);
   border-top-color: white;
   border-radius: 50%;
-  animation: spin 0.7s linear infinite;
+  animation: btn-spin 0.7s linear infinite;
 }
 
-@keyframes spin {
+@keyframes btn-spin {
   to { transform: rotate(360deg); }
+}
+
+/* =============================================================
+   Responsive
+   ============================================================= */
+@media (max-width: 1200px) {
+  .doc-grid {
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 16px;
+  }
+}
+
+@media (max-width: 768px) {
+  .library-content {
+    padding: 16px 20px;
+  }
+
+  .content-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .current-space {
+    font-size: 16px;
+  }
+
+  .header-right {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .doc-grid {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 14px;
+  }
+
+  .doc-card {
+    padding: 16px 14px 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .library-content {
+    padding: 12px 12px;
+  }
+
+  .doc-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 12px;
+  }
+
+  .doc-icon {
+    width: 48px;
+    height: 54px;
+  }
+
+  .doc-name {
+    font-size: 12px;
+  }
+
+  .doc-meta {
+    font-size: 10px;
+  }
+
+  .selected-info {
+    flex-wrap: wrap;
+  }
 }
 </style>

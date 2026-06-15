@@ -256,6 +256,7 @@ function getFileTypeLabel(iconName) {
     fileDoc: 'DOC',
     fileXls: 'XLS',
     fileTxt: 'TXT',
+    fileMd: 'MD',
   }
   return map[iconName] || null
 }

@@ -4,6 +4,7 @@ Document Reader - 本地文档读取器
 支持Excel数据的统计分析（均值、方差、分布等）
 """
 import os
+import json
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -142,6 +143,38 @@ class TxtReader(DocumentReader):
 
         logger.error(f"无法解码TXT文件: {file_path}, 所有编码都失败")
         return "Error reading TXT: Could not decode file with any supported encoding."
+
+
+class JsonReader(DocumentReader):
+    """JSON document reader implementation — pretty-prints JSON for readability"""
+
+    def read(self, file_path: str) -> str:
+        logger.info(f"开始读取JSON文件: {file_path}")
+        encodings = ["utf-8", "gbk", "gb2312", "latin-1"]
+        raw_text = None
+
+        for encoding in encodings:
+            try:
+                with open(file_path, "r", encoding=encoding) as f:
+                    raw_text = f.read()
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                logger.error(f"读取JSON文件失败: {file_path}, 错误: {str(e)}")
+                return f"Error reading JSON: {str(e)}"
+
+        if raw_text is None:
+            return "Error reading JSON: Could not decode file with any supported encoding."
+
+        try:
+            parsed = json.loads(raw_text)
+            formatted = json.dumps(parsed, indent=2, ensure_ascii=False)
+            logger.info(f"JSON文件读取成功: {file_path}, 字符数: {len(formatted)}")
+            return formatted
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON解析失败，返回原始文本: {file_path}, 错误: {str(e)}")
+            return raw_text
 
 
 class ExcelReader(DocumentReader):
@@ -469,6 +502,7 @@ class DocumentReaderFactory:
     _readers: dict[str, type[DocumentReader]] = {
         ".txt": TxtReader,
         ".md": MdReader,
+        ".json": JsonReader,
         ".docx": DocxReader,
         ".pdf": PdfReader,
         ".xlsx": ExcelReader,

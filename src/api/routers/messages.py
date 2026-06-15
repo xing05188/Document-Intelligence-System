@@ -979,12 +979,17 @@ async def _process_streaming_chat(
             await event_bus.publish(session_id, done_payload)
             return
 
-    # 进度队列
-    progress_queue: _queue_module.Queue = _queue_module.Queue()
+    has_progress = mode in ("entity_extraction", "table_filling")
 
-    def progress_callback(completed: int, total: int, message: str):
-        percent = int(completed / total * 100) if total > 0 else 0
-        progress_queue.put_nowait({"type": "progress", "progress": percent, "message": message})
+    # 进度队列（仅需要进度时创建，避免空队列轮询开销）
+    if has_progress:
+        progress_queue: _queue_module.Queue = _queue_module.Queue()
+
+        def progress_callback(completed: int, total: int, message: str):
+            percent = int(completed / total * 100) if total > 0 else 0
+            progress_queue.put_nowait({"type": "progress", "progress": percent, "message": message})
+    else:
+        progress_callback = None
 
     agent_service = AgentService()
     full_response = ""
@@ -997,16 +1002,17 @@ async def _process_streaming_chat(
             mode=mode,
             files=files,
             template_files=template_files,
-            progress_callback=progress_callback if mode in ("entity_extraction", "table_filling") else None,
+            progress_callback=progress_callback,
         ):
             full_response += chunk
-            # 处理进度队列中的消息
-            while not progress_queue.empty():
-                try:
-                    progress_msg = progress_queue.get_nowait()
-                    await event_bus.publish(session_id, progress_msg)
-                except _queue_module.Empty:
-                    break
+            # 仅在需要进度时轮询队列
+            if has_progress:
+                while not progress_queue.empty():
+                    try:
+                        progress_msg = progress_queue.get_nowait()
+                        await event_bus.publish(session_id, progress_msg)
+                    except _queue_module.Empty:
+                        break
 
             if mode == "entity_extraction":
                 await event_bus.publish(session_id, {"type": "chunk", "content": chunk, "result_type": "entity_extraction"})
@@ -1014,12 +1020,13 @@ async def _process_streaming_chat(
                 await event_bus.publish(session_id, {"type": "chunk", "content": chunk})
     finally:
         # 清空剩余的进度消息
-        while not progress_queue.empty():
-            try:
-                progress_msg = progress_queue.get_nowait()
-                await event_bus.publish(session_id, progress_msg)
-            except _queue_module.Empty:
-                break
+        if has_progress:
+            while not progress_queue.empty():
+                try:
+                    progress_msg = progress_queue.get_nowait()
+                    await event_bus.publish(session_id, progress_msg)
+                except _queue_module.Empty:
+                    break
 
     assistant_content = full_response
     assistant_meta: Dict[str, Any] = {"mode": mode}

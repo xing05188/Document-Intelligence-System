@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { useTabStore } from '../stores/tabStore'
 import { useAuthStore } from '../stores/authStore'
 import { useSessionStore } from '../stores/sessionStore'
+import { useTheme } from '../composables/useTheme'
 import SvgIcon from './icons/SvgIcon.vue'
 
 import LibrarySidebar from './library/LibrarySidebar.vue'
@@ -14,6 +15,10 @@ const authStore = useAuthStore()
 const sessionStore = useSessionStore()
 
 const isCollapsed = ref(false)
+
+const { theme, toggleTheme } = useTheme()
+
+const isDark = computed(() => theme.value === 'dark')
 
 const navItems = [
   { id: 'chat', label: '智能对话', icon: 'chat' },
@@ -93,6 +98,14 @@ function toggleCollapse() {
           <div class="user-name-small">{{ authStore.userDisplayName }}</div>
         </div>
       </div>
+
+      <button
+        class="theme-toggle-btn"
+        :title="isDark ? '切换为浅色主题' : '切换为深色主题'"
+        @click="toggleTheme"
+      >
+        <span class="theme-icon">{{ isDark ? '☀' : '☾' }}</span>
+      </button>
 
       <button 
         class="logout-btn-small" 
@@ -334,6 +347,38 @@ function toggleCollapse() {
   background: rgba(239, 68, 68, 0.08);
   border-color: rgba(239, 68, 68, 0.3);
   color: #ef4444;
+}
+
+/* 主题切换按钮 */
+.theme-toggle-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #d0d0d0);
+  background: transparent;
+  color: var(--text-secondary, #595959);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.theme-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.theme-toggle-btn:hover {
+  background: var(--bg-tertiary, #f0f1f5);
+  border-color: var(--border-color-hover);
+  color: var(--accent-primary);
+}
+
+.sidebar.collapsed .theme-toggle-btn {
+  width: 32px;
+  height: 32px;
 }
 
 .sidebar.collapsed .sidebar-footer {

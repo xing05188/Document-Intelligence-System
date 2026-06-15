@@ -55,12 +55,13 @@ export const useFileStore = defineStore('file', () => {
   }
 
   /** 从文档库添加已上传的文件（无需再上传） */
-  function addLibraryFile(file) {
-    tempFiles.value.data.push({
+  function addLibraryFile(file, type) {
+    const fileType = type || 'data'
+    tempFiles.value[fileType].push({
       id: file.id,
       file_name: file.name,
       file_size: file.size_bytes || file.size,
-      file_type: 'data',
+      file_type: fileType,
       storage_key: file.storage_key || file.file_path,
       file_path: file.storage_key || file.file_path,
       is_selected: true,
@@ -95,6 +96,7 @@ export const useFileStore = defineStore('file', () => {
     if (['pdf'].includes(ext)) return 'filePdf'
     if (['doc', 'docx'].includes(ext)) return 'fileDoc'
     if (['xls', 'xlsx', 'csv'].includes(ext)) return 'fileXls'
+  if (['json'].includes(ext)) return 'file'
     if (['png', 'jpg', 'jpeg'].includes(ext)) return 'file'
     return 'file'
   }

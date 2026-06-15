@@ -7,7 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Header, HTTPException, UploadFile, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -489,6 +489,101 @@ async def download_doc(
 
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico'}
+# 可被 LibreOffice 转换为 PDF 的格式
+CONVERTIBLE_EXTENSIONS = {'.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt', '.odt', '.ods', '.odp'}
+
+
+def convert_to_pdf(input_path: str) -> str:
+    """使用 LibreOffice 将文档转换为 PDF，返回 PDF 路径"""
+    import subprocess
+    import tempfile
+
+    output_dir = tempfile.mkdtemp(prefix="pdfconv_")
+    result = subprocess.run(
+        ['libreoffice', '--headless', '--convert-to', 'pdf',
+         '--outdir', output_dir, input_path],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"文档转 PDF 失败: {result.stderr}")
+    pdf_name = Path(input_path).stem + '.pdf'
+    pdf_path = str(Path(output_dir) / pdf_name)
+    if not Path(pdf_path).exists():
+        raise RuntimeError(f"转换后未找到 PDF 文件: {pdf_path}")
+    return pdf_path
+
+
+def _resolve_file_path(doc, cfg) -> Path:
+    """解析文档的本地文件路径（统一路径解析逻辑）"""
+    storage_key = doc.storage_key
+    blob_url = doc.blob_url
+    file_path = None
+
+    if storage_key and cfg.storage.enabled:
+        cache_path = Path(cfg.temp_dir) / "azure_blob_cache" / storage_key
+        try:
+            file_path = download_file_to_local(storage_key, cache_path, config=cfg)
+        except Exception:
+            pass
+    if not file_path and blob_url:
+        local_path = Path(blob_url)
+        if local_path.exists():
+            file_path = local_path
+    if not file_path and storage_key:
+        local_path = Path(storage_key)
+        if local_path.exists():
+            file_path = local_path
+    if not file_path:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return file_path
+
+
+@router.get("/docs/{doc_id}/preview-pdf")
+async def preview_doc_as_pdf(
+    doc_id: str,
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(default=None),
+):
+    """预览文档 — 返回 PDF 文件流
+
+    对 PDF 文件直接返回；对 docx/xlsx 等先用 LibreOffice 转换为 PDF 再返回。
+    前端可用 <embed> 浏览器原生渲染。
+    """
+    cfg = load_config()
+    user = _resolve_user(authorization, cfg)
+
+    doc = get_library_doc_by_id(doc_id, config=cfg, user_id=user.id if user else None)
+    if not doc:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    file_path = _resolve_file_path(doc, cfg)
+    file_ext = Path(doc.file_name).suffix.lower()
+    file_name = doc.file_name
+
+    # 已 PDF → 直接返回
+    if file_ext == '.pdf':
+        return FileResponse(
+            path=str(file_path),
+            filename=file_name,
+            media_type='application/pdf',
+        )
+
+    # 可转换格式 → 转为 PDF
+    if file_ext in CONVERTIBLE_EXTENSIONS:
+        pdf_path = convert_to_pdf(str(file_path))
+        # 响应完成后清理临时目录
+        temp_dir = str(Path(pdf_path).parent)
+        background_tasks.add_task(lambda: (
+            Path(pdf_path).unlink(missing_ok=True),
+            Path(temp_dir).rmdir() if Path(temp_dir).exists() else None,
+        ))
+        return FileResponse(
+            path=pdf_path,
+            filename=Path(file_name).stem + '.pdf',
+            media_type='application/pdf',
+        )
+
+    raise HTTPException(status_code=400, detail=f"不支持的文档格式: {file_ext}")
 
 
 @router.get("/docs/{doc_id}/preview")
