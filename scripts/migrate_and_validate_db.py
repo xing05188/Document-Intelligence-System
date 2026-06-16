@@ -20,10 +20,7 @@ from config import load_config
 from db.connection import build_conninfo, db_connection, health_check, is_database_configured
 
 MIGRATION_FILES = [
-    ROOT / "sql" / "001_create_sessions_tables.sql",
-    ROOT / "sql" / "schema_v1.sql",
-    ROOT / "sql" / "002_auth_user_file_scope.sql",
-    ROOT / "sql" / "003_library_tables.sql",
+    ROOT / "sql" / "merged_schema.sql",
 ]
 
 REQUIRED_TABLES = [
