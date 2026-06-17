@@ -29,14 +29,17 @@
   
   /* ---- Accents & Branding ---- */
   --accent-primary: #1677ff;      /* DeepSeek Blue */
+  --accent-primary-rgb: 22, 119, 255;
   --accent-primary-hover: #0e5ce6;
   --accent-primary-light: #e6f4ff;
   --accent-secondary: #0091ff;
   --accent-success: #10b981;
+  --accent-success-rgb: 16, 185, 129;
   --accent-success-light: #ecfdf5;
   --accent-warning: #faad14;
   --accent-warning-light: #fffbe6;
   --accent-danger: #ff4d4f;
+  --accent-danger-rgb: 255, 77, 79;
   --accent-danger-light: #fff1f0;
   --accent-info: #1677ff;
   
@@ -68,7 +71,6 @@
 }
 
 /* ===== DARK THEME ===== */
-:root[data-theme="dark"],
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     --theme: dark;
@@ -95,14 +97,17 @@
     
     /* ---- Accents & Branding ---- */
     --accent-primary: #3b82f6;
+    --accent-primary-rgb: 59, 130, 246;
     --accent-primary-hover: #60a5fa;
     --accent-primary-light: rgba(59, 130, 246, 0.1);
     --accent-secondary: #60a5fa;
     --accent-success: #10b981;
+    --accent-success-rgb: 16, 185, 129;
     --accent-success-light: rgba(16, 185, 129, 0.1);
     --accent-warning: #f59e0b;
     --accent-warning-light: rgba(245, 158, 11, 0.1);
     --accent-danger: #ef4444;
+    --accent-danger-rgb: 239, 68, 68;
     --accent-danger-light: rgba(239, 68, 68, 0.1);
     --accent-info: #3b82f6;
     
@@ -146,14 +151,17 @@
   
   /* ---- Accents & Branding ---- */
   --accent-primary: #3b82f6;
+  --accent-primary-rgb: 59, 130, 246;
   --accent-primary-hover: #60a5fa;
   --accent-primary-light: rgba(59, 130, 246, 0.1);
   --accent-secondary: #60a5fa;
   --accent-success: #10b981;
+  --accent-success-rgb: 16, 185, 129;
   --accent-success-light: rgba(16, 185, 129, 0.1);
   --accent-warning: #f59e0b;
   --accent-warning-light: rgba(245, 158, 11, 0.1);
   --accent-danger: #ef4444;
+  --accent-danger-rgb: 239, 68, 68;
   --accent-danger-light: rgba(239, 68, 68, 0.1);
   --accent-info: #3b82f6;
   
