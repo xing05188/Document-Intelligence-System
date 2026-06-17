@@ -531,6 +531,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
   // ==================== 执行状态 ====================
 
   const isExecuting = ref(false)
+  const lastExecutionId = ref('')
   const executionProgress = ref(0)
   const executionLogs = ref([])
   const outputFiles = ref([])
@@ -1034,6 +1035,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
 
       const res = await workflowApi.execute(params)
       const executionId = res?.execution_id
+      lastExecutionId.value = executionId || ''
 
       // 轮询执行状态
       await pollExecution(executionId)
@@ -1219,6 +1221,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     outputFormats,
     unsupportedFieldHints,
     isExecuting,
+    lastExecutionId,
     executionProgress,
     executionLogs,
     outputFiles,

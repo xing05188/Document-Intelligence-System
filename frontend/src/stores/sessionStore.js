@@ -228,6 +228,8 @@ export const useSessionStore = defineStore('session', () => {
   const progressValue = ref(0)
   const progressMessage = ref('')
   const showProgressBar = ref(false)
+  // 进度状态：'processing' | 'completed' | 'error'
+  const progressStatus = ref('processing')
 
   // SSE 任务完成回调（混合模式用于追踪单个子任务完成）
   let _sseDoneCallback = null
@@ -674,6 +676,7 @@ export const useSessionStore = defineStore('session', () => {
       if (isEntityOrTable) {
         showProgressBar.value = true
         progressValue.value = 0
+        progressStatus.value = 'processing'
         progressMessage.value = data.result_type === 'table_filling' || data.mode === 'table_filling'
           ? '开始筛选数据...'
           : '开始提取...'
@@ -682,6 +685,7 @@ export const useSessionStore = defineStore('session', () => {
       console.log('[SSE] type=progress:', data.progress, data.message)
       progressValue.value = data.progress
       progressMessage.value = data.message
+      progressStatus.value = 'processing'
     } else if (data.type === 'chunk') {
       console.log('[SSE] type=chunk, result_type:', data.result_type, 'content长度:', data.content?.length)
       if (data.result_type === 'entity_extraction') {
@@ -762,9 +766,16 @@ export const useSessionStore = defineStore('session', () => {
       flushImmediate()
       // 必须在任何可能出错的操作之前设置 isStreaming = false，确保 UI 不被卡死
       isStreaming.value = false
-      showProgressBar.value = false
+      // 完成状态：保持进度条可见（绿色完成态）
+      progressStatus.value = 'completed'
       progressValue.value = 100
       progressMessage.value = '处理完成'
+      // 2秒后自动隐藏进度条
+      setTimeout(() => {
+        if (progressStatus.value === 'completed') {
+          showProgressBar.value = false
+        }
+      }, 2000)
 
       try {
         const normalizedDoneFiles = normalizeGeneratedFiles(
@@ -817,7 +828,12 @@ export const useSessionStore = defineStore('session', () => {
       const errorMsg = typeof data.message === 'string' ? data.message : JSON.stringify(data.message)
       console.error('[SSE] type=error:', errorMsg)
       isStreaming.value = false
-      showProgressBar.value = false
+      // 错误状态：保持进度条可见（红色错误态），5秒后自动隐藏
+      progressStatus.value = 'error'
+      progressMessage.value = errorMsg
+      setTimeout(() => {
+        showProgressBar.value = false
+      }, 5000)
       if (_sseDoneCallback) {
         _sseDoneCallback({ success: false, error: errorMsg })
         _sseDoneCallback = null
@@ -1069,6 +1085,7 @@ export const useSessionStore = defineStore('session', () => {
       // 显示进度条
       showProgressBar.value = true
       progressValue.value = 0
+      progressStatus.value = 'processing'
       const currentProgressMsg = `处理文件 ${i + 1}/${taskList.length} - ${taskTypeName}: ${task.file.file_name}`
       progressMessage.value = currentProgressMsg
 
@@ -1313,6 +1330,7 @@ export const useSessionStore = defineStore('session', () => {
     currentModeConfig,
     progressValue,
     progressMessage,
+    progressStatus,
     showProgressBar,
     init,
     loadSessions,

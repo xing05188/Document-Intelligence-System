@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from config import SystemConfig, get_config
@@ -543,7 +544,7 @@ async def _run_execution(execution_id: str, params: ExecuteRequest):
                     "execution_id": execution_id,
                 },
             )
-            wf_result = coordinator.execute(task_spec, progress_callback=_make_progress_callback(execution_id))
+            wf_result = await asyncio.to_thread(coordinator.execute, task_spec, progress_callback=_make_progress_callback(execution_id))
             if not wf_result.success:
                 failed_count += 1
                 failure_messages.append(str(wf_result.message))
@@ -847,6 +848,113 @@ async def get_execution_status(execution_id: str):
         error=state["error"],
         error_code=error_code,
     )
+
+
+# ==================== 工作流输出文件预览/下载 ====================
+
+CONVERTIBLE_EXTENSIONS = {'.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt', '.odt', '.ods', '.odp'}
+TEXT_EXTENSIONS = {'.txt', '.md', '.json', '.csv', '.xml', '.yaml', '.yml', '.html', '.htm', '.log'}
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.svg'}
+
+
+def _resolve_output_file(execution_id: str, file_index: int) -> str:
+    """根据 execution_id 和 file_index 查找输出文件路径。"""
+    state = _EXECUTION_STATES.get(execution_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="执行记录不存在")
+    output_files = state.get("output_files", [])
+    if file_index < 0 or file_index >= len(output_files):
+        raise HTTPException(status_code=404, detail="输出文件索引不存在")
+    file_info = output_files[file_index]
+    file_path = file_info.get("path") or file_info.get("blob_name")
+    if not file_path or not Path(file_path).exists():
+        raise HTTPException(status_code=404, detail="输出文件不存在")
+    return str(file_path)
+
+
+@router.get("/executions/{execution_id}/download/{file_index}")
+async def download_output_file(execution_id: str, file_index: int):
+    """下载工作流输出文件。"""
+    file_path = _resolve_output_file(execution_id, file_index)
+    state = _EXECUTION_STATES.get(execution_id, {})
+    output_files = state.get("output_files", [])
+    file_name = output_files[file_index].get("name", Path(file_path).name)
+    ext = Path(file_path).suffix.lower()
+    media_type = "application/octet-stream"
+    if ext in TEXT_EXTENSIONS:
+        media_type = "text/plain; charset=utf-8"
+    elif ext == ".pdf":
+        media_type = "application/pdf"
+    elif ext in IMAGE_EXTENSIONS:
+        media_type = f"image/{ext[1:]}"
+    elif ext in (".docx", ".doc"):
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    elif ext in (".xlsx", ".xls"):
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return FileResponse(path=file_path, filename=file_name, media_type=media_type)
+
+
+@router.get("/executions/{execution_id}/preview/{file_index}")
+async def preview_output_file(execution_id: str, file_index: int):
+    """预览工作流输出文件内容（文本格式）。"""
+    file_path = _resolve_output_file(execution_id, file_index)
+    state = _EXECUTION_STATES.get(execution_id, {})
+    output_files = state.get("output_files", [])
+    file_name = output_files[file_index].get("name", Path(file_path).name)
+    ext = Path(file_path).suffix.lower()
+
+    # 文本格式 → 返回内容
+    if ext in TEXT_EXTENSIONS:
+        content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        return {"content": content, "name": file_name}
+
+    # 图片 → 返回类型信息和 download URL，前端展示
+    if ext in IMAGE_EXTENSIONS:
+        base_url = f"/api/workflows/executions/{execution_id}/download/{file_index}"
+        return {"content": "", "type": "image", "image_url": base_url, "name": file_name}
+
+    # 非文本格式 → 请使用 preview-pdf 端点
+    raise HTTPException(status_code=400, detail=f"格式 {ext} 不支持文本预览，请使用预览PDF端点")
+
+
+@router.get("/executions/{execution_id}/preview-pdf/{file_index}")
+async def preview_output_file_as_pdf(execution_id: str, file_index: int, background_tasks: BackgroundTasks):
+    """预览工作流输出文件 — 返回 PDF 流。
+
+    对 PDF 文件直接返回；对 docx/xlsx 等先用 LibreOffice 转换为 PDF 再返回。
+    """
+    file_path = _resolve_output_file(execution_id, file_index)
+    state = _EXECUTION_STATES.get(execution_id, {})
+    output_files = state.get("output_files", [])
+    file_name = output_files[file_index].get("name", Path(file_path).name)
+    ext = Path(file_path).suffix.lower()
+
+    # 已 PDF → 直接返回
+    if ext == ".pdf":
+        return FileResponse(
+            path=file_path,
+            filename=file_name,
+            media_type="application/pdf",
+        )
+
+    # 可转换格式 → 转为 PDF
+    if ext in CONVERTIBLE_EXTENSIONS:
+        from .library import convert_to_pdf
+
+        pdf_path = convert_to_pdf(file_path)
+        # 响应完成后清理临时目录
+        temp_dir = str(Path(pdf_path).parent)
+        background_tasks.add_task(lambda: (
+            Path(pdf_path).unlink(missing_ok=True),
+            Path(temp_dir).rmdir() if Path(temp_dir).exists() else None,
+        ))
+        return FileResponse(
+            path=pdf_path,
+            filename=Path(file_name).stem + ".pdf",
+            media_type="application/pdf",
+        )
+
+    raise HTTPException(status_code=400, detail=f"不支持的预览格式: {ext}")
 
 
 @router.get("/models", response_model=List[Dict[str, str]])

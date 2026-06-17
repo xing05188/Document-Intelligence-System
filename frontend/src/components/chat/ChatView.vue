@@ -96,9 +96,14 @@ async function openChatFilePreview(att) {
   chatPreviewError.value = ''
   chatPreviewLoading.value = true
 
+  // 确保 Vue 先渲染"正在加载..."状态，再启动异步下载
+  await nextTick()
+
   const sid = sessionStore.currentSessionId
   const fileId = att.id ?? att.file_id
   const ext = (att.file_name || '').split('.').pop().toLowerCase()
+
+  let gotContent = false
 
   try {
     if (chatPreviewIsText.value) {
@@ -110,34 +115,47 @@ async function openChatFilePreview(att) {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         })
         if (!res.ok) throw new Error(`下载失败 (${res.status})`)
-        const text = await res.text()
-        chatPreviewTextContent.value = text
+        chatPreviewTextContent.value = await res.text()
+        gotContent = true
       }
     } else {
       // 二进制格式 → 获取 blob
-      if (sid && fileId) {
-        const url = `/api/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(fileId)}/download`
-        const token = localStorage.getItem('access_token') || ''
-        const res = await fetch(url, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        })
-        if (res.ok) {
-          chatPreviewBlob.value = await res.blob()
-        } else if (res.status === 404) {
-          // 会话文件未找到 → 尝试用 storage_key 或通过文档库下载
-          const storageKey = att.storage_key || att.file_path
-          if (storageKey) {
-            const fallbackUrl = `/api/files/download-by-blob?blob_name=${encodeURIComponent(storageKey)}`
-            const res2 = await fetch(fallbackUrl, {
-              headers: token ? { Authorization: `Bearer ${token}` } : {},
-            })
-            if (!res2.ok) throw new Error(`预览加载失败`)
-            chatPreviewBlob.value = await res2.blob()
-          } else {
-            throw new Error('文件未找到')
+      const storageKey = att.storage_key || att.file_path
+      const token = localStorage.getItem('access_token') || ''
+      const authHeaders = token ? { Authorization: `Bearer ${token}` } : {}
+
+      if (storageKey) {
+        // 1) 优先通过 blob 下载（避免 session 下载 404）
+        const blobUrl = `/api/files/download-by-blob?blob_name=${encodeURIComponent(storageKey)}`
+        const blobRes = await fetch(blobUrl, { headers: authHeaders })
+        if (blobRes.ok) {
+          chatPreviewBlob.value = await blobRes.blob()
+          gotContent = true
+        } else if (sid) {
+          // 2) blob 失败 → session 下载，用 storageKey 作为 fileId
+          //    下载端点支持按 storage_key 匹配文件（解决文档库 UUID id 无法匹配 int id 的问题）
+          const sessUrl = `/api/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(storageKey)}/download`
+          const sessRes = await fetch(sessUrl, { headers: authHeaders })
+          if (sessRes.ok) {
+            chatPreviewBlob.value = await sessRes.blob()
+            gotContent = true
+          } else if (fileId) {
+            // 3) 两种方式都用原始 fileId 尝试（兼容旧消息）
+            const sessUrl2 = `/api/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(fileId)}/download`
+            const sessRes2 = await fetch(sessUrl2, { headers: authHeaders })
+            if (sessRes2.ok) {
+              chatPreviewBlob.value = await sessRes2.blob()
+              gotContent = true
+            }
           }
-        } else {
-          throw new Error(`下载失败 (${res.status})`)
+        }
+      } else if (sid && fileId) {
+        // 无 storage_key → 直接走 session 下载
+        const sessUrl = `/api/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(fileId)}/download`
+        const sessRes = await fetch(sessUrl, { headers: authHeaders })
+        if (sessRes.ok) {
+          chatPreviewBlob.value = await sessRes.blob()
+          gotContent = true
         }
       }
     }
@@ -145,6 +163,11 @@ async function openChatFilePreview(att) {
     chatPreviewError.value = e.message || '预览加载失败'
   } finally {
     chatPreviewLoading.value = false
+  }
+
+  // 如果所有下载途径都失败，却未进入 catch，补设错误提示
+  if (!gotContent && !chatPreviewError.value && !chatPreviewIsText.value) {
+    chatPreviewError.value = '文件未找到或无法访问'
   }
 }
 
@@ -255,6 +278,7 @@ const selectedLibDocIds = ref(new Set())
 const showProgress = computed(() => sessionStore.showProgressBar)
 const progressVal = computed(() => sessionStore.progressValue)
 const progressMsg = computed(() => sessionStore.progressMessage)
+const progressStatus = computed(() => sessionStore.progressStatus)
 const pendingAttachments = computed(() => ([
   ...fileStore.tempFiles.data.map(file => ({ ...file, _kind: 'data' })),
   ...fileStore.tempFiles.template.map(file => ({ ...file, _kind: 'template' }))
@@ -1038,19 +1062,45 @@ function userMessageAttachments(msg) {
           </div>
         </div>
 
-        <!-- 进度条（实体提取/表格填表） -->
-        <div v-if="showProgress && (sessionStore.currentMode === 'entity_extraction' || sessionStore.currentMode === 'table_filling' || sessionStore.currentMode === 'mixed')" class="message assistant">
-          <div class="message-avatar"><SvgIcon name="gear" :size="20" /></div>
+        <!-- 进度条（实体提取/表格填表/混合模式） -->
+        <div v-if="showProgress && (sessionStore.currentMode === 'entity_extraction' || sessionStore.currentMode === 'table_filling' || sessionStore.currentMode === 'mixed')"
+             class="message assistant"
+             :class="{ 'progress-error': progressStatus === 'error', 'progress-completed': progressStatus === 'completed' }">
+          <div class="message-avatar">
+            <SvgIcon :name="progressStatus === 'error' ? 'warning' : (progressStatus === 'completed' ? 'checkCircle' : 'gear')" :size="20" />
+          </div>
           <div class="message-content">
-            <div class="progress-card">
-              <div class="progress-header">
-                <span class="progress-title">任务处理中</span>
-                <span class="progress-msg">{{ progressMsg }}</span>
-                <span v-if="progressVal < 100" class="progress-indicator">●</span>
-                <span v-else class="progress-done">完成</span>
+            <div class="progress-card" :class="'progress-' + progressStatus">
+              <!-- 百分比数值显示 -->
+              <div class="progress-percentage-display" :class="'progress-percentage-' + progressStatus">
+                <span class="progress-number">{{ progressVal }}%</span>
+                <span class="progress-label">
+                  {{ progressStatus === 'processing' ? '处理中' : (progressStatus === 'completed' ? '已完成' : '处理失败') }}
+                </span>
               </div>
-              <div class="progress-bar-container">
-                <div class="progress-bar" :style="{ width: progressVal + '%' }"></div>
+
+              <!-- 进度条 -->
+              <div class="progress-bar-container" :class="'progress-bar-' + progressStatus">
+                <div class="progress-bar" :class="'progress-bar-fill-' + progressStatus"
+                     :style="{ width: progressVal + '%' }">
+                </div>
+              </div>
+
+              <!-- 状态信息 -->
+              <div class="progress-footer">
+                <span class="progress-msg" :class="'progress-msg-' + progressStatus">{{ progressMsg }}</span>
+                <!-- 处理中的脉冲动画 -->
+                <span v-if="progressStatus === 'processing'" class="progress-indicator-pulse">
+                  <span class="pulse-dot"></span>
+                </span>
+                <!-- 完成状态 -->
+                <span v-else-if="progressStatus === 'completed'" class="progress-badge completed-badge">
+                  <SvgIcon name="check" :size="14" /> 完成
+                </span>
+                <!-- 错误状态 -->
+                <span v-else-if="progressStatus === 'error'" class="progress-badge error-badge">
+                  <SvgIcon name="close" :size="14" /> 失败
+                </span>
               </div>
             </div>
           </div>
@@ -1995,82 +2045,201 @@ function userMessageAttachments(msg) {
   margin-left: 8px;
 }
 
-/* ---- Upload Progress Message ---- */
-.message-bubble.upload-progress {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font-size: 13px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-}
-
-.upload-text {
-  color: var(--text-muted);
-}
-
 /* ---- Progress Card ---- */
 .progress-card {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
-  padding: 14px 18px;
+  padding: 18px 20px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+  transition: border-color 0.4s ease, box-shadow 0.4s ease;
 }
 
-.progress-header {
+/* 处理中状态 */
+.progress-card.progress-processing {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 1px rgba(var(--accent-primary-rgb), 0.08);
+}
+
+/* 完成状态 */
+.progress-card.progress-completed {
+  border-color: var(--accent-success);
+  box-shadow: 0 0 0 1px rgba(var(--accent-success-rgb), 0.1);
+}
+
+/* 错误状态 */
+.progress-card.progress-error {
+  border-color: var(--accent-danger);
+  box-shadow: 0 0 0 1px rgba(var(--accent-danger-rgb), 0.1);
+}
+
+/* ===== 百分比数值显示 ===== */
+.progress-percentage-display {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.progress-number {
+  font-size: 36px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  transition: color 0.4s ease;
+}
+
+.progress-percentage-processing .progress-number {
+  color: var(--accent-primary);
+}
+
+.progress-percentage-completed .progress-number {
+  color: var(--accent-success);
+}
+
+.progress-percentage-error .progress-number {
+  color: var(--accent-danger);
+}
+
+.progress-label {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* ===== 进度条 ===== */
+.progress-bar-container {
+  height: 8px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  margin-bottom: 12px;
+  transition: background 0.4s ease;
+}
+
+.progress-bar-processing {
+  background: var(--bg-tertiary);
+}
+
+.progress-bar-completed {
+  background: rgba(var(--accent-success-rgb), 0.12);
+}
+
+.progress-bar-error {
+  background: rgba(var(--accent-danger-rgb), 0.12);
+}
+
+.progress-bar {
+  height: 100%;
+  border-radius: var(--radius-full);
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+              background 0.5s ease,
+              box-shadow 0.5s ease;
+  position: relative;
+  min-width: 0;
+}
+
+/* 处理中：渐变 + 光泽动画 */
+.progress-bar-fill-processing {
+  background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary), var(--accent-primary));
+  background-size: 200% 100%;
+  animation: shimmer 2s ease-in-out infinite;
+  box-shadow: 0 0 6px rgba(var(--accent-primary-rgb), 0.3);
+}
+
+/* 完成：纯色 + 无动画 */
+.progress-bar-fill-completed {
+  background: var(--accent-success);
+  box-shadow: 0 0 4px rgba(var(--accent-success-rgb), 0.2);
+}
+
+/* 错误：红色 + 无动画 */
+.progress-bar-fill-error {
+  background: var(--accent-danger);
+  box-shadow: 0 0 4px rgba(var(--accent-danger-rgb), 0.2);
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ===== 底部状态栏 ===== */
+.progress-footer {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
-  flex-wrap: wrap;
-}
-
-.progress-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
+  min-height: 20px;
 }
 
 .progress-msg {
   font-size: 12px;
   color: var(--text-muted);
   flex: 1;
-  min-width: 60px;
-}
-
-.progress-indicator {
-  font-size: 10px;
-  color: var(--accent-primary);
-  animation: pulse 1.2s infinite;
-}
-
-.progress-done {
-  font-size: 12px;
-  color: var(--accent-success);
-  font-weight: 600;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
-
-.progress-bar-container {
-  height: 6px;
-  background: var(--bg-tertiary);
-  border-radius: var(--radius-full);
+  min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.3s ease;
 }
 
-.progress-bar {
-  height: 100%;
-  background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
-  border-radius: var(--radius-full);
-  transition: width 0.4s ease;
+.progress-msg-completed {
+  color: var(--accent-success);
+}
+
+.progress-msg-error {
+  color: var(--accent-danger);
+}
+
+/* 脉冲指示器 */
+.progress-indicator-pulse {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  animation: pulse-scale 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse-scale {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(var(--accent-primary-rgb), 0.5);
+  }
+  50% {
+    transform: scale(1.3);
+    opacity: 0.7;
+    box-shadow: 0 0 6px 2px rgba(var(--accent-primary-rgb), 0.2);
+  }
+}
+
+/* 状态徽章 */
+.progress-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  flex-shrink: 0;
+}
+
+.completed-badge {
+  background: rgba(var(--accent-success-rgb), 0.1);
+  color: var(--accent-success);
+}
+
+.error-badge {
+  background: rgba(var(--accent-danger-rgb), 0.1);
+  color: var(--accent-danger);
 }
 
 /* ---- Typing Indicator ---- */

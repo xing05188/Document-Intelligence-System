@@ -11,6 +11,11 @@ import ExcelRenderer from './ExcelRenderer.vue'
 const props = defineProps({
   doc: { type: Object, default: null },
   visible: { type: Boolean, default: false },
+  // 可选的自定义 fetch 函数（非文档库文件预览，如工作流文件、本地上传文件）
+  fetchPreviewPdf: { type: Function, default: null },   // (doc) => Promise<Blob>
+  fetchDownload: { type: Function, default: null },     // (doc) => Promise<Blob>
+  fetchPreview: { type: Function, default: null },       // (doc) => Promise<Object>
+  downloadUrl: { type: String, default: '' },            // 自定义下载 URL（空时自动从 doc.id 生成）
 })
 
 const emit = defineEmits(['close'])
@@ -45,6 +50,7 @@ const isPdfFormat = computed(() => {
 })
 
 function getDownloadUrl(docId) {
+  if (props.downloadUrl) return props.downloadUrl
   const baseUrl = import.meta.env.VITE_API_BASE_URL || ''
   return `${baseUrl}/api/library/docs/${docId}/download`
 }
@@ -70,15 +76,18 @@ async function loadPreview() {
   try {
     if (docType.value === 'pdf') {
       // PDF → 调用 /preview-pdf 端点（直接返回 PDF 流）
-      const res = await libraryApi.previewDocAsPdf(props.doc.id)
+      const fn = props.fetchPreviewPdf || (doc => libraryApi.previewDocAsPdf(doc.id))
+      const res = await fn(props.doc)
       fileBlob.value = res
     } else if (isBinaryFormat.value) {
       // docx/excel → 从 download 端点获取原始 blob，用各自渲染器
-      const res = await libraryApi.downloadDocBlob(props.doc.id)
+      const fn = props.fetchDownload || (doc => libraryApi.downloadDocBlob(doc.id))
+      const res = await fn(props.doc)
       fileBlob.value = res
     } else {
       // 文本格式 → 从 preview 端点获取文本
-      const res = await libraryApi.previewDoc(props.doc.id)
+      const fn = props.fetchPreview || (doc => libraryApi.previewDoc(doc.id))
+      const res = await fn(props.doc)
       previewData.value = res
     }
   } catch (e) {

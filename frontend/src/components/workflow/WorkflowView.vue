@@ -34,7 +34,7 @@ function openBatchModal() {
 </script>
 
 <template>
-  <div class="workflow-view" :class="{ 'left-collapsed': leftCollapsed, 'right-collapsed': rightCollapsed }">
+  <div class="workflow-view" :class="{ 'right-collapsed': rightCollapsed }">
     <!-- Canvas (full width) -->
     <WorkflowCanvas @open-batch-modal="openBatchModal" />
     <!-- Right Sidebar -->

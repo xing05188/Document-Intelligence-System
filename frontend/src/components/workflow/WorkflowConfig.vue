@@ -3,6 +3,8 @@ import { ref, computed, onMounted } from 'vue'
 import { useWorkflowStore } from '../../stores/workflowStore'
 import { useLibraryStore } from '../../stores/libraryStore'
 import SvgIcon from '../icons/SvgIcon.vue'
+import DocPreview from '../library/DocPreview.vue'
+import workflowApi from '../../api/workflow'
 
 const emit = defineEmits(['openBatchModal'])
 const workflowStore = useWorkflowStore()
@@ -13,6 +15,93 @@ const fileInputRef = ref(null)
 const isLoadingLibrary = ref(false)
 const newSpaceName = ref('')
 const isSaving = ref(false)
+
+// ==================== 预览状态 ====================
+const showPreview = ref(false)
+const previewDoc = ref(null)
+const previewFetchPdfFn = ref(null)
+const previewFetchDownloadFn = ref(null)
+const previewFetchPreviewFn = ref(null)
+const previewDownloadUrl = ref('')
+
+function closePreview() {
+  showPreview.value = false
+  previewDoc.value = null
+  previewFetchPdfFn.value = null
+  previewFetchDownloadFn.value = null
+  previewFetchPreviewFn.value = null
+  previewDownloadUrl.value = ''
+}
+
+/** 预览文档库的文件（复用 DocPreview 默认的 libraryApi 获取方式） */
+function previewLibraryDoc(doc) {
+  previewDoc.value = doc
+  // 清除自定义 fetch 函数，让 DocPreview 使用默认的 libraryApi 方法
+  previewFetchPdfFn.value = null
+  previewFetchDownloadFn.value = null
+  previewFetchPreviewFn.value = null
+  previewDownloadUrl.value = ''
+  showPreview.value = true
+}
+
+/** 预览本地上传的文件（浏览器端直接读取 File 对象） */
+function previewUploadedFile(item) {
+  const nameParts = item.name.split('.')
+  const ext = nameParts.length > 1 ? nameParts.pop().toLowerCase() : ''
+  const rawFile = item.file // 实际 File 对象（包装对象中存储为 file 字段）
+  if (!rawFile) return
+
+  previewDoc.value = { name: item.name, file_extension: ext }
+  showPreview.value = true
+
+  const textExts = ['txt', 'md', 'json', 'csv', 'xml', 'yaml', 'yml', 'html', 'log']
+  const binaryExts = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt']
+
+  if (ext === 'pdf') {
+    previewFetchPdfFn.value = async () => new Blob([rawFile], { type: rawFile.type })
+    previewFetchDownloadFn.value = async () => new Blob([rawFile], { type: rawFile.type })
+    previewFetchPreviewFn.value = null
+    previewDownloadUrl.value = URL.createObjectURL(rawFile)
+  } else if (binaryExts.includes(ext)) {
+    previewFetchPdfFn.value = null
+    previewFetchDownloadFn.value = async () => new Blob([rawFile], { type: rawFile.type })
+    previewFetchPreviewFn.value = null
+    previewDownloadUrl.value = URL.createObjectURL(rawFile)
+  } else if (textExts.includes(ext)) {
+    previewFetchPdfFn.value = null
+    previewFetchDownloadFn.value = null
+    previewFetchPreviewFn.value = async () => ({ content: await rawFile.text() })
+    previewDownloadUrl.value = URL.createObjectURL(rawFile)
+  } else {
+    // 未知格式：尝试作为文本读取
+    previewFetchPdfFn.value = null
+    previewFetchDownloadFn.value = null
+    previewFetchPreviewFn.value = async () => ({ content: await rawFile.text() })
+    previewDownloadUrl.value = ''
+  }
+}
+
+/** 预览工作流输出文件（通过后端 API） */
+function previewOutputFile(file, fileIndex) {
+  const nameParts = file.name.split('.')
+  const ext = nameParts.length > 1 ? nameParts.pop().toLowerCase() : ''
+  const executionId = workflowStore.lastExecutionId
+  if (!executionId) return
+
+  previewDoc.value = { name: file.name, file_extension: ext }
+  showPreview.value = true
+
+  previewFetchPdfFn.value = async () => {
+    return await workflowApi.previewOutputFileAsPdf(executionId, fileIndex)
+  }
+  previewFetchDownloadFn.value = async () => {
+    return await workflowApi.downloadOutputFile(executionId, fileIndex)
+  }
+  previewFetchPreviewFn.value = async () => {
+    return await workflowApi.previewOutputFile(executionId, fileIndex)
+  }
+  previewDownloadUrl.value = `/api/workflows/executions/${executionId}/download/${fileIndex}`
+}
 
 // 加载文档库空间
 onMounted(async () => {
@@ -788,6 +877,11 @@ function getFileTypeLabel(iconName) {
                 <span class="doc-list-icon"><SvgIcon name="file" :size="16" /></span>
                 <span class="doc-list-name">{{ doc.name }}</span>
                 <span class="doc-list-size">{{ doc.size }}</span>
+                <button
+                  class="doc-list-preview"
+                  @click.stop="previewLibraryDoc(doc)"
+                  title="预览"
+                >👁</button>
               </div>
             </div>
           </div>
@@ -824,6 +918,11 @@ function getFileTypeLabel(iconName) {
                 <span class="local-file-name">{{ file.name }}</span>
                 <span class="local-file-size">{{ _formatSize(file.size) }}</span>
                 <button
+                  class="local-file-preview"
+                  @click="previewUploadedFile(file)"
+                  title="预览"
+                >👁</button>
+                <button
                   class="local-file-remove"
                   @click="workflowStore.removeLocalFile(file.id)"
                 >×</button>
@@ -846,6 +945,11 @@ function getFileTypeLabel(iconName) {
               <span class="selected-doc-icon"><SvgIcon name="file" :size="16" /></span>
               <span class="selected-doc-name">{{ doc.name }}</span>
               <span class="selected-doc-size">{{ doc.size }}</span>
+              <button
+                class="doc-preview-btn"
+                @click="previewLibraryDoc(doc)"
+                title="预览"
+              >👁</button>
             </div>
             <div
               v-for="file in displayedLocalFiles"
@@ -907,13 +1011,16 @@ function getFileTypeLabel(iconName) {
         <div v-if="workflowStore.outputFiles.length > 0 && !workflowStore.isExecuting" class="output-files-section">
           <div class="output-files-title">输出文件</div>
           <div
-            v-for="f in workflowStore.outputFiles"
+            v-for="(f, i) in workflowStore.outputFiles"
             :key="f.path"
             class="output-file-item"
           >
             <span class="output-file-name">{{ f.name }}</span>
             <span class="output-file-size">{{ (f.size / 1024).toFixed(1) }} KB</span>
-            <button class="output-download-btn" @click="downloadFile(f)">下载</button>
+            <div class="output-file-actions">
+              <button class="output-preview-btn" @click="previewOutputFile(f, i)">预览</button>
+              <button class="output-download-btn" @click="downloadFile(f)">下载</button>
+            </div>
           </div>
         </div>
       </div>
@@ -941,6 +1048,16 @@ function getFileTypeLabel(iconName) {
         </div>
       </div>
 
+      <!-- ==================== 文件预览弹窗 ==================== -->
+      <DocPreview
+        :doc="previewDoc"
+        :visible="showPreview"
+        :fetch-preview-pdf="previewFetchPdfFn"
+        :fetch-download="previewFetchDownloadFn"
+        :fetch-preview="previewFetchPreviewFn"
+        :download-url="previewDownloadUrl"
+        @close="closePreview"
+      />
     </div>
   </div>
 </template>
@@ -1670,6 +1787,32 @@ function getFileTypeLabel(iconName) {
   flex-shrink: 0;
 }
 
+.doc-list-preview {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  font-size: 14px;
+  color: var(--accent-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
+.doc-list-item:hover .doc-list-preview {
+  opacity: 0.8;
+}
+
+.doc-list-preview:hover {
+  opacity: 1 !important;
+  background: var(--bg-tertiary);
+}
+
 .selected-docs-list {
   margin-top: 8px;
 }
@@ -1703,6 +1846,28 @@ function getFileTypeLabel(iconName) {
   font-size: 12px;
   color: var(--text-muted);
   flex-shrink: 0;
+}
+
+.doc-preview-btn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  font-size: 14px;
+  color: var(--accent-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.doc-preview-btn:hover {
+  opacity: 1;
+  background: var(--bg-tertiary);
 }
 
 /* ---- Local Upload ---- */
@@ -1782,6 +1947,28 @@ function getFileTypeLabel(iconName) {
   color: var(--text-muted);
   font-size: 12px;
   flex-shrink: 0;
+}
+
+.local-file-preview {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  font-size: 14px;
+  color: var(--accent-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.local-file-preview:hover {
+  opacity: 1;
+  background: var(--bg-tertiary);
 }
 
 .local-file-remove {
@@ -2074,6 +2261,30 @@ function getFileTypeLabel(iconName) {
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
+}
+
+.output-file-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.output-preview-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--accent-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
+}
+
+.output-preview-btn:hover {
+  background: var(--accent-primary);
+  color: white;
+  border-color: var(--accent-primary);
 }
 
 .output-download-btn {

@@ -238,7 +238,7 @@ async def mixed_fill(request: MixedFillRequest, authorization: str | None = Head
                 role="output",
                 storage_key=storage_key,
             )
-            file_ids.append({"file_id": session_file.id, "file_name": path_obj.name, "file_path": str(path_obj)})
+            file_ids.append({"file_id": session_file.id, "file_name": path_obj.name, "file_path": str(path_obj), "storage_key": storage_key or str(path_obj)})
         except Exception:
             continue
 

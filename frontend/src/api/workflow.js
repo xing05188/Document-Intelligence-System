@@ -37,9 +37,28 @@ export default {
   },
 
   /** 查询工作流执行状态 */
-  getExecutionStatus(executionId) {
-    return client.get(`/workflows/executions/${executionId}`)
-  },
+getExecutionStatus(executionId) {
+  return client.get(`/workflows/executions/${executionId}`)
+},
+
+/** 预览工作流输出文件（文本格式） */
+previewOutputFile(executionId, fileIndex) {
+  return client.get(`/workflows/executions/${executionId}/preview/${fileIndex}`)
+},
+
+/** 预览工作流输出文件为 PDF（返回 blob） */
+previewOutputFileAsPdf(executionId, fileIndex) {
+  return client.get(`/workflows/executions/${executionId}/preview-pdf/${fileIndex}`, {
+    responseType: 'blob'
+  })
+},
+
+/** 下载工作流输出文件（返回 blob） */
+downloadOutputFile(executionId, fileIndex) {
+  return client.get(`/workflows/executions/${executionId}/download/${fileIndex}`, {
+    responseType: 'blob'
+  })
+},
 
   /** 获取可用的 LLM 模型列表 */
   getModels() {

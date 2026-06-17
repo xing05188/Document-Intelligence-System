@@ -267,6 +267,23 @@ def _data_rollup_content(content: str, file_name: str, config_values: Dict) -> O
     return _chat_or_keep(content, prompt, "数据汇总", temperature=0.2)
 
 
+LANGUAGE_MAP = {
+    "zh": "中文",
+    "en": "英语",
+    "ja": "日语",
+    "ko": "韩语",
+    "fr": "法语",
+    "de": "德语",
+    "es": "西班牙语",
+    "ru": "俄语",
+    "ar": "阿拉伯语",
+    "pt": "葡萄牙语",
+    "中文": "中文",
+    "英语": "英语",
+    "英文": "英语",
+}
+
+
 def _translate_content(content: str, file_name: str, config: SystemConfig, config_values: Dict = None) -> Optional[str]:
     """使用 LLM 翻译文档内容。"""
     service = _get_llm_service()
@@ -275,13 +292,23 @@ def _translate_content(content: str, file_name: str, config: SystemConfig, confi
 
     config_values = config_values or {}
     text = content[:8000] if len(content) > 8000 else content
-    
+
+    # 将语言代码转为可读的名称
+    raw_lang = config_values.get("targetLanguage", "中文")
+    target_language = LANGUAGE_MAP.get(raw_lang, raw_lang)
+
     # 优先使用自定义提示词
     custom_prompt = config_values.get("prompt", "").strip()
     if custom_prompt:
-        prompt = custom_prompt.replace("{content}", text) if "{content}" in custom_prompt else f"{custom_prompt}\n{text}"
+        if "{content}" in custom_prompt:
+            prompt = custom_prompt.replace("{content}", text)
+        else:
+            prompt = (
+                f"{custom_prompt}\n"
+                f"目标语言：{target_language}\n\n"
+                f"文档内容：\n{text}"
+            )
     else:
-        target_language = config_values.get("targetLanguage", "中文")
         prompt = (
             f"你是一个专业的文档翻译助手。请将以下文档翻译为{target_language}，保持原文的格式和结构。\n"
             "注意：\n"

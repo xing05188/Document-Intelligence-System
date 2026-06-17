@@ -46,7 +46,11 @@ class EventBus:
 
     async def publish(self, session_id: str, event: dict):
         """发布事件到指定 session 的队列"""
-        await self._get_queue(session_id).put(event)
+        queue = self._get_queue(session_id)
+        await queue.put(event)
+        if event.get("type") in ("progress", "start", "done", "error"):
+            print(f"[EventBus] 发布 type={event.get('type')} session={session_id[:8]}... "
+                  f"queue_size={queue.qsize()} event={json.dumps(event, ensure_ascii=False)[:200]}")
 
     async def subscribe(self, session_id: str, timeout: float = 30.0):
         """订阅指定 session 的事件。每次 await 返回一个事件，超时返回 keepalive。"""
@@ -54,6 +58,10 @@ class EventBus:
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=timeout)
+                etype = event.get("type", "")
+                if etype == "progress":
+                    print(f"[EventBus] 消费 type=progress session={session_id[:8]}... "
+                          f"progress={event.get('progress')}% message={event.get('message')}")
                 yield event
                 if event.get("type") in ("done", "error"):
                     break
@@ -190,6 +198,7 @@ def _ensure_files_in_db(files: List[Dict[str, Any]], session_id: str, cfg, user_
                 "id": db_file.id,
                 "file_id": db_file.id,
                 "file_name": db_file.file_name,
+                "file_path": getattr(db_file, "file_path", "") or f.get("file_path", ""),
                 "storage_key": getattr(db_file, "storage_key", None) or db_file.file_path,
                 "file_size": db_file.file_size,
                 "file_type": db_file.file_type,
@@ -217,6 +226,7 @@ def _ensure_files_in_db(files: List[Dict[str, Any]], session_id: str, cfg, user_
                 "id": session_file.id,
                 "file_id": session_file.id,
                 "file_name": session_file.file_name,
+                "file_path": getattr(session_file, "file_path", "") or f.get("file_path", ""),
                 "storage_key": getattr(session_file, "storage_key", None) or session_file.file_path,
                 "file_size": session_file.file_size,
                 "file_type": session_file.file_type,
@@ -484,6 +494,7 @@ def _persist_generated_files(session_id: str, cfg, user_id: Optional[str], paylo
                 "file_name": dest_path.name,
                 "file_path": str(dest_path),
                 "file_type": dest_path.suffix.lower().lstrip(".") or "output",
+                "storage_key": storage_key or str(dest_path),
             })
         except Exception:
             continue
@@ -580,7 +591,7 @@ def _save_entity_extraction_files(session_id: str, cfg, user_id: Optional[str], 
                 role="output",
                 storage_key=storage_key_xlsx,
             )
-            saved_files.append({"file_id": sf_xlsx.id, "file_name": xlsx_name, "file_path": str(xlsx_path), "file_type": "xlsx"})
+            saved_files.append({"file_id": sf_xlsx.id, "file_name": xlsx_name, "file_path": str(xlsx_path), "file_type": "xlsx", "storage_key": storage_key_xlsx or str(xlsx_path)})
             print(f"[WS] _save_entity_extraction_files: XLSX保存成功 id={sf_xlsx.id} type=xlsx")
         except Exception as e:
             print(f"[WS] 保存 XLSX 文件失败: {e}")
@@ -628,7 +639,7 @@ def _save_table_filling_files(session_id: str, cfg, user_id: Optional[str], tabl
                     role="output",
                     storage_key=storage_key,
                 )
-                saved_files.append({"file_id": sf.id, "file_name": json_name, "file_path": str(dest_path), "file_type": "json"})
+                saved_files.append({"file_id": sf.id, "file_name": json_name, "file_path": str(dest_path), "file_type": "json", "storage_key": storage_key or str(dest_path)})
                 print(f"[WS] _save_table_filling_files: JSON保存成功 id={sf.id}")
             except Exception as e:
                 print(f"[WS] _save_table_filling_files: 保存JSON失败: {e}")
@@ -676,7 +687,7 @@ def _save_table_filling_files(session_id: str, cfg, user_id: Optional[str], tabl
                     role="output",
                     storage_key=storage_key,
                 )
-                saved_files.append({"file_id": sf.id, "file_name": xlsx_name, "file_path": str(dest_path), "file_type": ext})
+                saved_files.append({"file_id": sf.id, "file_name": xlsx_name, "file_path": str(dest_path), "file_type": ext, "storage_key": storage_key or str(dest_path)})
                 print(f"[WS] _save_table_filling_files: XLSX保存成功 id={sf.id}")
             except Exception as e:
                 print(f"[WS] _save_table_filling_files: 保存XLSX失败: {e}")
@@ -740,6 +751,7 @@ def _collect_new_generated_files(session_id: str, cfg, user_id: Optional[str], b
             "file_name": f.file_name,
             "file_path": getattr(f, "file_path", ""),
             "file_type": getattr(f, "file_type", ""),
+            "storage_key": getattr(f, "storage_key", None) or getattr(f, "file_path", ""),
         })
     print(f"[WS] _collect_new_generated_files 返回: {generated}")
     return generated
@@ -771,10 +783,25 @@ async def send_message(session_id: str, request: SendMessageRequest, authorizati
     
     effective_mode = (request.mode or session.current_mode or "default_conversation").strip()
 
+    # 先处理文件入库，确保文件在 session_files 表中有记录并拿到正确的 int id
+    if request.files is not None or request.template_files is not None:
+        db_data_files = list(request.files or [])
+        db_template_files = list(request.template_files or [])
+    else:
+        db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
+
+    db_data_files = _ensure_files_in_db(db_data_files, session_id, cfg, current_user.id if current_user else None)
+    db_template_files = _ensure_files_in_db(db_template_files, session_id, cfg, current_user.id if current_user else None)
+
+    # 构造 user_meta，用入库后的正确 int id 替换前端传入的 UUID id
     user_meta: Dict[str, Any] = {**(request.metadata or {}), "mode": effective_mode}
-    if request.files:
+    if db_data_files:
+        user_meta["files"] = db_data_files
+    elif request.files:
         user_meta["files"] = request.files
-    if request.template_files:
+    if db_template_files:
+        user_meta["template_files"] = db_template_files
+    elif request.template_files:
         user_meta["template_files"] = request.template_files
 
     # 保存用户消息（含附件元数据，供前端展示「文件 + 文字」为一条消息）
@@ -786,16 +813,6 @@ async def send_message(session_id: str, request: SendMessageRequest, authorizati
         config=cfg,
         user_id=current_user.id if current_user else None,
     )
-
-    if request.files is not None or request.template_files is not None:
-        db_data_files = list(request.files or [])
-        db_template_files = list(request.template_files or [])
-    else:
-        db_data_files, db_template_files = get_selected_session_files_payload(session_id, cfg)
-
-    # 确保临时文件在数据库中有记录
-    db_data_files = _ensure_files_in_db(db_data_files, session_id, cfg, current_user.id if current_user else None)
-    db_template_files = _ensure_files_in_db(db_template_files, session_id, cfg, current_user.id if current_user else None)
 
     # 表格填表走直达执行核，避免聊天/会话链路与 tests/test_d/run.py 的逻辑偏离。
     if effective_mode == "table_filling":
@@ -926,7 +943,6 @@ async def _process_streaming_chat(
     current_user,
 ):
     """处理流式聊天消息，将事件发布到 event_bus（替代 WebSocket 处理逻辑）"""
-    import queue as _queue_module
 
     user_id = current_user.id if current_user else None
 
@@ -945,6 +961,13 @@ async def _process_streaming_chat(
         source_file, template_file = _pick_table_filling_inputs(files, template_files)
         if source_file and template_file:
             print(f"[SSE] table_filling start session_id={session_id}")
+
+            # 进度：开始读取 Excel
+            await event_bus.publish(session_id, {
+                "type": "progress", "progress": 5,
+                "message": "正在读取 Excel 数据文件..."
+            })
+
             response = await asyncio.to_thread(
                 run_agent_d_api,
                 src=_resolve_file_reference(source_file, cfg, session_id, "source"),
@@ -954,12 +977,30 @@ async def _process_streaming_chat(
                 output_template="",
                 allow_rule_fallback=True,
             )
+
+            # 进度：数据筛选完成
+            await event_bus.publish(session_id, {
+                "type": "progress", "progress": 50,
+                "message": "数据筛选完成，正在填充模板..."
+            })
+
             table_filling_data = _flatten_table_filling_response(response)
             if not table_filling_data.get("success", False):
                 error_msg = table_filling_data.get("message") or "表格填表失败"
-                await event_bus.publish(session_id, {"type": "error", "mode": mode, "result_type": "table_filling", "message": error_msg, "data": table_filling_data})
-                add_message(session_id, "assistant", error_msg, {"mode": mode, "tableFillingData": table_filling_data}, config=cfg, user_id=user_id)
+                await event_bus.publish(session_id, {
+                    "type": "error", "mode": mode, "result_type": "table_filling",
+                    "message": error_msg, "data": table_filling_data
+                })
+                add_message(session_id, "assistant", error_msg,
+                           {"mode": mode, "tableFillingData": table_filling_data},
+                           config=cfg, user_id=user_id)
                 return
+
+            # 进度：保存文件
+            await event_bus.publish(session_id, {
+                "type": "progress", "progress": 75,
+                "message": "模板填充完成，正在保存文件..."
+            })
 
             saved = _save_table_filling_files(session_id, cfg, user_id, table_filling_data)
             if saved:
@@ -968,9 +1009,17 @@ async def _process_streaming_chat(
             if preview_rows:
                 table_filling_data["previewData"] = preview_rows
 
+            # 进度：处理完成
+            await event_bus.publish(session_id, {
+                "type": "progress", "progress": 100,
+                "message": "表格填表处理完成"
+            })
+
             full_response = json.dumps(table_filling_data, ensure_ascii=False)
             await event_bus.publish(session_id, {"type": "chunk", "content": full_response, "result_type": "table_filling"})
-            add_message(session_id, "assistant", table_filling_data.get("message", ""), {"mode": mode, "tableFillingData": table_filling_data}, config=cfg, user_id=user_id)
+            add_message(session_id, "assistant", table_filling_data.get("message", ""),
+                       {"mode": mode, "tableFillingData": table_filling_data},
+                       config=cfg, user_id=user_id)
 
             done_payload = {"type": "done", "mode": mode, "result_type": "table_filling", "table_filling_data": table_filling_data}
             final_files = saved if saved else _fallback_table_filling_generated_files(table_filling_data)
@@ -981,22 +1030,53 @@ async def _process_streaming_chat(
 
     has_progress = mode in ("entity_extraction", "table_filling")
 
-    # 进度队列（仅需要进度时创建，避免空队列轮询开销）
     if has_progress:
-        progress_queue: _queue_module.Queue = _queue_module.Queue()
+        print(f"[SSE-progress] 创建 progress_callback, mode={mode}")
+        # 使用 threading.Queue 桥接后台线程 → 事件循环
+        _progress_queue: queue.Queue = queue.Queue()
+
+        async def _poll_progress():
+            """后台轮询：从 threading.Queue 读取进度事件并发布到 event_bus"""
+            loop = asyncio.get_running_loop()
+            while True:
+                try:
+                    # 使用 run_in_executor 在普通线程中等待 queue.get
+                    event = await loop.run_in_executor(
+                        None, lambda: _progress_queue.get(timeout=0.2)
+                    )
+                    await event_bus.publish(session_id, event)
+                except queue.Empty:
+                    continue
+                except asyncio.CancelledError:
+                    # 排空剩余事件
+                    while not _progress_queue.empty():
+                        try:
+                            ev = _progress_queue.get_nowait()
+                            await event_bus.publish(session_id, ev)
+                        except queue.Empty:
+                            break
+                    break
+                except Exception as e:
+                    print(f"[SSE-progress] 轮询异常: {e}")
+
+        poller_task = asyncio.create_task(_poll_progress())
 
         def progress_callback(completed: int, total: int, message: str):
             percent = int(completed / total * 100) if total > 0 else 0
-            progress_queue.put_nowait({"type": "progress", "progress": percent, "message": message})
+            _progress_queue.put({
+                "type": "progress",
+                "progress": percent,
+                "message": message
+            })
     else:
         progress_callback = None
+        poller_task = None
 
     agent_service = AgentService()
     full_response = ""
     extraction_files: List[Dict[str, Any]] = []
 
-    try:
-        async for chunk in agent_service.chat_stream(
+    async for chunk in agent_service.chat_stream(
             session_id,
             content,
             mode=mode,
@@ -1005,28 +1085,19 @@ async def _process_streaming_chat(
             progress_callback=progress_callback,
         ):
             full_response += chunk
-            # 仅在需要进度时轮询队列
-            if has_progress:
-                while not progress_queue.empty():
-                    try:
-                        progress_msg = progress_queue.get_nowait()
-                        await event_bus.publish(session_id, progress_msg)
-                    except _queue_module.Empty:
-                        break
 
             if mode == "entity_extraction":
                 await event_bus.publish(session_id, {"type": "chunk", "content": chunk, "result_type": "entity_extraction"})
             else:
                 await event_bus.publish(session_id, {"type": "chunk", "content": chunk})
-    finally:
-        # 清空剩余的进度消息
-        if has_progress:
-            while not progress_queue.empty():
-                try:
-                    progress_msg = progress_queue.get_nowait()
-                    await event_bus.publish(session_id, progress_msg)
-                except _queue_module.Empty:
-                    break
+
+    # 停止进度轮询
+    if poller_task:
+        poller_task.cancel()
+        try:
+            await poller_task
+        except asyncio.CancelledError:
+            pass
 
     assistant_content = full_response
     assistant_meta: Dict[str, Any] = {"mode": mode}
