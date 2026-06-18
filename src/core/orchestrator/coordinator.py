@@ -367,6 +367,10 @@ class WorkflowCoordinator:
         """
         self.logger.info("进入表格填表模式")
 
+        # 通知前端任务已启动
+        if progress_callback:
+            progress_callback(0, 1, "开始处理表格数据...")
+
         # Agent_D 处理表格
         result = self.executor.execute_agent(
             agent_name="agent_d",

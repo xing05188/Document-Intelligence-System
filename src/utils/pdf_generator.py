@@ -5,6 +5,7 @@ Markdown / Plain Text → PDF 生成器（基于 reportlab）。
 
 from __future__ import annotations
 
+import platform
 import re
 from pathlib import Path
 from typing import List
@@ -25,14 +26,41 @@ from reportlab.platypus import (
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# 字体路径（Windows 常用中文字体，优先使用系统自带）
-FONT_DIR = Path("C:/WINDOWS/Fonts")
-CHINESE_FONT_CANDIDATES = [
-    ("msyh.ttc", "Microsoft YaHei"),
-    ("msyhbd.ttc", "Microsoft YaHei Bold"),
-    ("simhei.ttf", "SimHei"),
-    ("simsun.ttc", "SimSun"),
-    ("NotoSansSC-VF.ttf", "NotoSansSC"),
+# ---------------------------------------------------------------------------
+# 中文字体发现 & 注册（跨平台：Windows / Linux）
+# ---------------------------------------------------------------------------
+
+def _get_font_search_dirs() -> list[Path]:
+    """返回当前平台的中文字体搜索目录列表（按优先级排序）。"""
+    dirs: list[Path] = []
+    if platform.system() == "Windows":
+        win_dir = Path(platform.win32_ver()[0] if hasattr(platform, 'win32_ver') else "C:/Windows")
+        dirs.append(win_dir / "Fonts")
+    else:
+        # Linux 常见字体目录
+        dirs = [
+            Path("/usr/share/fonts/truetype/wqy"),      # WenQuanYi
+            Path("/usr/share/fonts/opentype/noto"),     # Noto CJK
+            Path("/usr/share/fonts/truetype"),           # 通用
+            Path("/usr/share/fonts"),
+            Path("/usr/local/share/fonts"),
+        ]
+    return dirs
+
+
+# 中文字体候选列表（文件名, 标签）
+# reportlab 的 TTFont 支持 .ttc 文件，通过 subfontIndex 选择子字体（0=第一个字体）
+WINDOWS_FONT_CANDIDATES: list[tuple[str, str, int]] = [
+    ("msyh.ttc",       "Microsoft YaHei",       0),
+    ("msyhbd.ttc",     "Microsoft YaHei Bold",  0),
+    ("simhei.ttf",     "SimHei",                0),
+    ("simsun.ttc",     "SimSun",                0),
+    ("NotoSansSC-VF.ttf", "NotoSansSC",          0),
+]
+
+LINUX_FONT_CANDIDATES: list[tuple[str, str, int]] = [
+    ("wqy-microhei.ttc",  "WenQuanYi Micro Hei", 0),
+    ("wqy-zenhei.ttc",    "WenQuanYi Zen Hei",   0),
 ]
 
 # 全局注册字体别名（模块级别只注册一次）
@@ -42,27 +70,70 @@ _font_registered: bool = False
 
 
 def _register_chinese_font() -> None:
-    """注册中文字体到 reportlab，全局只执行一次。"""
+    """注册中文字体到 reportlab，全局只执行一次。
+
+    先尝试注册粗体（用于标题 / **粗体**），再注册常规体。
+    优先使用 Noto Sans CJK（Linux）或 Microsoft YaHei（Windows）。
+    全部失败则回退到内置 Helvetica（不支持中文，显示为方框）。
+    """
     global _font_normal, _font_bold, _font_registered
     if _font_registered:
         return
     _font_registered = True
 
-    for font_file, font_label in CHINESE_FONT_CANDIDATES:
-        p = FONT_DIR / font_file
-        if not p.exists():
-            continue
-        try:
-            # 用唯一别名注册，避免与内置字体同名冲突
-            alias = "ChineseFont"
-            pdfmetrics.registerFont(TTFont(alias, str(p)))
-            _font_normal = alias
-            _font_bold = alias  # 同一体（reportlab 不支持粗体别名）
-            return
-        except Exception:
-            continue
+    is_linux = platform.system() != "Windows"
+    search_dirs = _get_font_search_dirs()
+    candidates = LINUX_FONT_CANDIDATES if is_linux else WINDOWS_FONT_CANDIDATES
 
-    # 全部失败：用内置 Helvetica
+    # 1) 尝试注册粗体（Bold）
+    bold_alias = "ChineseFont-Bold"
+    bold_ok = False
+    for font_file, _label, subfont in candidates:
+        if "Bold" not in font_file and "bd" not in font_file:
+            continue  # 跳过非粗体候选
+        for d in search_dirs:
+            p = d / font_file
+            if not p.exists():
+                continue
+            try:
+                pdfmetrics.registerFont(TTFont(bold_alias, str(p), subfontIndex=subfont))
+                bold_ok = True
+                break
+            except Exception:
+                continue
+        if bold_ok:
+            break
+
+    # 2) 尝试注册常规体（Regular）
+    normal_alias = "ChineseFont"
+    normal_ok = False
+    for font_file, _label, subfont in candidates:
+        if "Bold" in font_file or "bd" in font_file:
+            continue  # 跳过粗体候选
+        for d in search_dirs:
+            p = d / font_file
+            if not p.exists():
+                continue
+            try:
+                pdfmetrics.registerFont(TTFont(normal_alias, str(p), subfontIndex=subfont))
+                normal_ok = True
+                break
+            except Exception:
+                continue
+        if normal_ok:
+            break
+
+    # 3) 如果只找到了一个，两个都用同一个
+    if normal_ok:
+        _font_normal = normal_alias
+        _font_bold = bold_alias if bold_ok else normal_alias
+        return
+    if bold_ok:
+        _font_normal = bold_alias
+        _font_bold = bold_alias
+        return
+
+    # 4) 全部失败：回退到 Helvetica
     _font_normal = "Helvetica"
     _font_bold = "Helvetica-Bold"
 
@@ -221,14 +292,33 @@ def _esc(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _replace_inline(m: re.Match) -> str:
+    """根据匹配的分组返回对应的 reportlab XML 标签。"""
+    if m.group(1) is not None:
+        return f"<b>{m.group(1)}</b>"
+    if m.group(2) is not None:
+        return f"<b>{m.group(2)}</b>"
+    if m.group(3) is not None:
+        return f"<i>{m.group(3)}</i>"
+    if m.group(4) is not None:
+        return f"<i>{m.group(4)}</i>"
+    if m.group(5) is not None:
+        return f"<font face='Courier' color='#c7254e'>{m.group(5)}</font>"
+    return m.group(0)
+
+
 def _render(text: str, base_style: ParagraphStyle) -> str:
-    """将 markdown 行内样式转为 reportlab XML 标记。"""
+    """将 markdown 行内样式转为 reportlab XML 标记。
+
+    使用单次正则替换，按优先级匹配 **粗体** > __粗体__ > *斜体* > _斜体_ > `代码`，
+    确保 **...*...*** 这类重叠标记生成正确嵌套的 XML 标签。
+    """
     result = _esc(text)
-    result = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", result)
-    result = re.sub(r"__(.+?)__", r"<b>\1</b>", result)
-    result = re.sub(r"\*(.+?)\*", r"<i>\1</i>", result)
-    result = re.sub(r"_(.+?)_", r"<i>\1</i>", result)
-    result = re.sub(r"`(.+?)`", r"<font face='Courier' color='#c7254e'>\1</font>", result)
+    result = re.sub(
+        r"\*\*(.+?)\*\*|__(.+?)__|\*(.+?)\*|_(.+?)_|`(.+?)`",
+        _replace_inline,
+        result,
+    )
     return result
 
 

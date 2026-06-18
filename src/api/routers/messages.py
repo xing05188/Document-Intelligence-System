@@ -116,6 +116,11 @@ class SendMessageResponse(BaseModel):
     mode: Optional[str] = None
 
 
+class AddAssistantMessageRequest(BaseModel):
+    content: str = Field(..., description="消息内容")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="元数据")
+
+
 def _resolve_current_user(authorization: Optional[str], cfg):
     if not authorization:
         if cfg.auth.require_auth:
@@ -814,8 +819,8 @@ async def send_message(session_id: str, request: SendMessageRequest, authorizati
         user_id=current_user.id if current_user else None,
     )
 
-    # 表格填表走直达执行核，避免聊天/会话链路与 tests/test_d/run.py 的逻辑偏离。
-    if effective_mode == "table_filling":
+    # 表格填表走直达执行核（仅非流式模式；流式模式走 _process_streaming_chat 以支持 SSE 进度推送）
+    if effective_mode == "table_filling" and not request.stream:
         source_file, template_file = _pick_table_filling_inputs(db_data_files, db_template_files)
         if source_file and template_file:
             request_table_targets = []
@@ -956,77 +961,8 @@ async def _process_streaming_chat(
         f.id for f in get_session_files(session_id, config=cfg, user_id=user_id)
     }
 
-    # 表格填表模式单独处理（同 WebSocket 逻辑）
-    if mode == "table_filling":
-        source_file, template_file = _pick_table_filling_inputs(files, template_files)
-        if source_file and template_file:
-            print(f"[SSE] table_filling start session_id={session_id}")
-
-            # 进度：开始读取 Excel
-            await event_bus.publish(session_id, {
-                "type": "progress", "progress": 5,
-                "message": "正在读取 Excel 数据文件..."
-            })
-
-            response = await asyncio.to_thread(
-                run_agent_d_api,
-                src=_resolve_file_reference(source_file, cfg, session_id, "source"),
-                prompt=content,
-                template=_resolve_file_reference(template_file, cfg, session_id, "template"),
-                output_json="",
-                output_template="",
-                allow_rule_fallback=True,
-            )
-
-            # 进度：数据筛选完成
-            await event_bus.publish(session_id, {
-                "type": "progress", "progress": 50,
-                "message": "数据筛选完成，正在填充模板..."
-            })
-
-            table_filling_data = _flatten_table_filling_response(response)
-            if not table_filling_data.get("success", False):
-                error_msg = table_filling_data.get("message") or "表格填表失败"
-                await event_bus.publish(session_id, {
-                    "type": "error", "mode": mode, "result_type": "table_filling",
-                    "message": error_msg, "data": table_filling_data
-                })
-                add_message(session_id, "assistant", error_msg,
-                           {"mode": mode, "tableFillingData": table_filling_data},
-                           config=cfg, user_id=user_id)
-                return
-
-            # 进度：保存文件
-            await event_bus.publish(session_id, {
-                "type": "progress", "progress": 75,
-                "message": "模板填充完成，正在保存文件..."
-            })
-
-            saved = _save_table_filling_files(session_id, cfg, user_id, table_filling_data)
-            if saved:
-                table_filling_data["generated_files"] = saved
-            preview_rows = _build_table_filling_preview_rows(table_filling_data)
-            if preview_rows:
-                table_filling_data["previewData"] = preview_rows
-
-            # 进度：处理完成
-            await event_bus.publish(session_id, {
-                "type": "progress", "progress": 100,
-                "message": "表格填表处理完成"
-            })
-
-            full_response = json.dumps(table_filling_data, ensure_ascii=False)
-            await event_bus.publish(session_id, {"type": "chunk", "content": full_response, "result_type": "table_filling"})
-            add_message(session_id, "assistant", table_filling_data.get("message", ""),
-                       {"mode": mode, "tableFillingData": table_filling_data},
-                       config=cfg, user_id=user_id)
-
-            done_payload = {"type": "done", "mode": mode, "result_type": "table_filling", "table_filling_data": table_filling_data}
-            final_files = saved if saved else _fallback_table_filling_generated_files(table_filling_data)
-            if final_files:
-                done_payload["generated_files"] = final_files
-            await event_bus.publish(session_id, done_payload)
-            return
+    # table_filling 不再特殊处理，走通用 chat_stream + progress_callback 路径（与 entity_extraction 一致）
+    # 通过 coordinator._table_filling_flow → agent_d.execute → _extract_entities 全链路上报进度
 
     has_progress = mode in ("entity_extraction", "table_filling")
 
@@ -1088,6 +1024,8 @@ async def _process_streaming_chat(
 
             if mode == "entity_extraction":
                 await event_bus.publish(session_id, {"type": "chunk", "content": chunk, "result_type": "entity_extraction"})
+            elif mode == "table_filling":
+                await event_bus.publish(session_id, {"type": "chunk", "content": chunk, "result_type": "table_filling"})
             else:
                 await event_bus.publish(session_id, {"type": "chunk", "content": chunk})
 
@@ -1101,10 +1039,34 @@ async def _process_streaming_chat(
 
     assistant_content = full_response
     assistant_meta: Dict[str, Any] = {"mode": mode}
+    done_payload: Dict[str, Any] = {"type": "done", "mode": mode}
 
     if mode == "entity_extraction":
         assistant_content = _normalize_entity_extraction_response(full_response)
         extraction_files = _save_entity_extraction_files(session_id, cfg, user_id, full_response)
+        # 解析实体数据供 done 事件携带，前端混合模式需统计实体记录数
+        try:
+            import json as _json
+            _parsed = _json.loads(full_response) if full_response else {}
+            done_payload["extractionData"] = {
+                "entities": _parsed.get("entities", []) if isinstance(_parsed, dict) else [],
+            }
+        except Exception:
+            pass
+    elif mode == "table_filling":
+        import json as _json
+        try:
+            table_data = _json.loads(full_response) if full_response else {}
+        except Exception:
+            table_data = {}
+        saved = _save_table_filling_files(session_id, cfg, user_id, table_data)
+        if saved:
+            table_data["generated_files"] = saved
+        preview_rows = _build_table_filling_preview_rows(table_data)
+        if preview_rows:
+            table_data["previewData"] = preview_rows
+        assistant_content = table_data.get("message", "")
+        assistant_meta["tableFillingData"] = table_data
 
     generated_files = _collect_new_generated_files(session_id, cfg, user_id, before_file_ids)
     if extraction_files:
@@ -1114,10 +1076,13 @@ async def _process_streaming_chat(
 
     add_message(session_id, "assistant", assistant_content, assistant_meta, config=cfg, user_id=user_id)
 
-    done_payload = {"type": "done", "mode": mode}
     final_files = extraction_files if extraction_files else generated_files
     if final_files:
         done_payload["generated_files"] = final_files
+    # table_filling 需要将结果数据附到 done 事件中，供前端混合模式统计记录数
+    if mode == "table_filling" and assistant_meta.get("tableFillingData"):
+        done_payload["table_filling_data"] = assistant_meta["tableFillingData"]
+        done_payload["result_type"] = "table_filling"
     await event_bus.publish(session_id, done_payload)
     print(f"[SSE] 发送 done session_id={session_id}")
 
@@ -1142,3 +1107,31 @@ async def stream_messages(session_id: str):
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     })
+
+
+@router.post("/{session_id}/add", response_model=MessageResponse)
+async def add_assistant_message_api(
+    session_id: str,
+    request: AddAssistantMessageRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    直接添加一条 assistant 消息（用于前端编排的混合模式等场景持久化汇总消息）。
+    不会触发 AI 处理，仅持久化到数据库。
+    """
+    cfg = load_config()
+    current_user = _resolve_current_user(authorization, cfg)
+
+    session = get_session_by_id(session_id, config=cfg, user_id=current_user.id if current_user else None)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    row = add_message(
+        session_id,
+        "assistant",
+        request.content,
+        metadata=request.metadata or {},
+        config=cfg,
+        user_id=current_user.id if current_user else None,
+    )
+    return _message_to_dict(row)

@@ -10,6 +10,13 @@ export default {
   },
 
   /**
+   * 直接添加一条 assistant 消息（用于前端编排的混合模式等场景持久化汇总消息）
+   */
+  add(sessionId, data) {
+    return client.post(`/messages/${sessionId}/add`, data)
+  },
+
+  /**
    * 返回 SSE 流式端点的完整 URL（包含认证 token）
    */
   streamUrl(sessionId) {

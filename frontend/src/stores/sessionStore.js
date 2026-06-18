@@ -165,6 +165,17 @@ function normalizeMessageForResultDisplay(msg) {
   }
   if (!metadata || typeof metadata !== 'object') metadata = {}
 
+  // 从 metadata 中提取混合模式相关字段，确保刷新后仍能正确渲染
+  if (!normalized.mixedSource && metadata.mixedSource) {
+    normalized.mixedSource = metadata.mixedSource
+  }
+  if (!normalized.entitiesData && metadata.entitiesData) {
+    normalized.entitiesData = metadata.entitiesData
+  }
+  if (!normalized.tableFillingPreview && metadata.tableFillingPreview) {
+    normalized.tableFillingPreview = metadata.tableFillingPreview
+  }
+
   const rootGenerated = normalizeGeneratedFiles(
     normalized.generated_files || normalized.generatedFiles || normalized.output_files
   )
@@ -682,6 +693,8 @@ export const useSessionStore = defineStore('session', () => {
           : '开始提取...'
       }
     } else if (data.type === 'progress') {
+      // 已完成/已失败状态下忽略后续进度更新，防止覆盖 done 事件的状态
+      if (progressStatus.value === 'completed' || progressStatus.value === 'error') return
       console.log('[SSE] type=progress:', data.progress, data.message)
       progressValue.value = data.progress
       progressMessage.value = data.message
@@ -766,16 +779,11 @@ export const useSessionStore = defineStore('session', () => {
       flushImmediate()
       // 必须在任何可能出错的操作之前设置 isStreaming = false，确保 UI 不被卡死
       isStreaming.value = false
-      // 完成状态：保持进度条可见（绿色完成态）
+      // 标记完成状态（进度条立即显示为绿色 100% 后随即隐藏）
       progressStatus.value = 'completed'
       progressValue.value = 100
       progressMessage.value = '处理完成'
-      // 2秒后自动隐藏进度条
-      setTimeout(() => {
-        if (progressStatus.value === 'completed') {
-          showProgressBar.value = false
-        }
-      }, 2000)
+      showProgressBar.value = false
 
       try {
         const normalizedDoneFiles = normalizeGeneratedFiles(
@@ -991,9 +999,9 @@ export const useSessionStore = defineStore('session', () => {
     let tableRowCount = 0
 
     for (const r of results) {
-      const mode = r?.task?.mode || r?.mode || r?.result_type
+      const mode = r?.task?.mode || r?.mode || r?.result_type || r?.data?.mode
       if (mode === 'entity_extraction') {
-        const entities = r?.resp?.extractionData?.entities || []
+        const entities = r?.data?.extractionData?.entities || r?.resp?.extractionData?.entities || []
         for (const entity of entities) {
           if (entity && typeof entity === 'object') {
             mergedEntities.push(entity)
@@ -1001,7 +1009,7 @@ export const useSessionStore = defineStore('session', () => {
           }
         }
       } else if (mode === 'table_filling') {
-        const tf = r?.resp?.tableFillingData
+        const tf = r?.data?.table_filling_data || r?.resp?.tableFillingData
         if (!tf || typeof tf !== 'object') continue
 
         const rows = await loadJsonRowsFromArtifacts(
@@ -1139,6 +1147,7 @@ export const useSessionStore = defineStore('session', () => {
 
     // 单文件直接返回
     if (taskList.length === 1) {
+      showProgressBar.value = false
       console.log('[混合模式] 单文件处理完成')
       return
     }
@@ -1154,7 +1163,7 @@ export const useSessionStore = defineStore('session', () => {
       const gf = normalizeGeneratedFiles(r?.data?.generated_files)
       if (gf.length > 0) mergedGeneratedFiles.push(...gf)
       
-      const tf = r?.resp?.tableFillingData
+      const tf = r?.data?.table_filling_data || r?.resp?.tableFillingData
       if (tf && typeof tf === 'object') {
         const tfGf = normalizeGeneratedFiles(tf.generated_files)
         if (tfGf.length > 0) mergedGeneratedFiles.push(...tfGf)
@@ -1255,6 +1264,20 @@ export const useSessionStore = defineStore('session', () => {
       tableFillingPreview: mixedFillPreviewData || tableFillingPreviewData,
       generated_files: mixedFillFiles.length > 0 ? mixedFillFiles : uniqueFiles,
     })
+
+    // 持久化 merged 消息到 localStorage 和后端，确保刷新后不丢失
+    saveMessagesCache(currentSessionId.value, messages.value)
+    messageApi.add(currentSessionId.value, {
+      content: finalContent,
+      metadata: {
+        mixedSource: 'merged',
+        entitiesData: mergeResult.entities,
+        tableFillingPreview: mixedFillPreviewData || tableFillingPreviewData,
+        generated_files: mixedFillFiles.length > 0 ? mixedFillFiles : uniqueFiles,
+      },
+    }).catch(e => console.warn('[混合模式] 持久化 merged 消息失败:', e.message))
+
+    showProgressBar.value = false
   }
 
   async function init() {

@@ -917,6 +917,9 @@ function userMessageAttachments(msg) {
                       <button v-for="f in msg.generated_files" :key="'dl-'+f.file_id" class="entity-action-btn" @click="downloadResultFile(f)">
                         ↓ 下载
                       </button>
+                      <button v-for="f in msg.generated_files" :key="'lib-'+f.file_id" class="entity-action-btn save-to-lib-btn" type="button" @click="openSaveToLib(f)">
+                        保存到文档库
+                      </button>
                     </div>
                   </div>
                   <div v-if="msg.tableFillingPreview?.previewData?.length" class="entity-table-wrapper">
@@ -947,14 +950,6 @@ function userMessageAttachments(msg) {
               <div v-else-if="msg.entitiesData?.length && msg.mixedSource !== 'merged'" class="entity-preview table-fill-preview">
                 <div class="entity-preview-header">
                   <span class="entity-preview-title"><SvgIcon name="chart" :size="16" /> 提取结果预览（共 {{ msg.entitiesData.length }} 条）</span>
-                  <div class="entity-preview-actions">
-                    <button v-for="f in msg.generated_files" :key="'preview-'+f.file_id" class="entity-action-btn" @click="previewGeneratedFile(f)">
-                      {{ getFileExt(f.file_name) }} 预览
-                    </button>
-                    <button v-for="f in msg.generated_files" :key="'dl-'+f.file_id" class="entity-action-btn" @click="downloadResultFile(f)">
-                      ↓ 下载
-                    </button>
-                  </div>
                 </div>
                 <div class="entity-table-wrapper">
                   <table class="entity-table">
@@ -1008,7 +1003,7 @@ function userMessageAttachments(msg) {
               </div>
               <!-- 混合模式或非表格任务的文件下载：独立显示，不与 entitiesData 块冲突 -->
               <div
-                v-if="msg.generated_files?.length && !getTableFillingData(msg) && msg.entitiesData?.length"
+                v-if="msg.generated_files?.length && !getTableFillingData(msg) && msg.entitiesData?.length && msg.mixedSource !== 'merged'"
                 class="entity-preview table-fill-preview table-fill-downloads-only"
               >
                 <div class="entity-preview-header">
@@ -1028,7 +1023,7 @@ function userMessageAttachments(msg) {
               </div>
               <!-- 仅文件下载：实体提取等场景；表格填表已在上方标题栏处理，勿与 msg.generated_files 再渲一排 -->
               <div
-                v-else-if="msg.generated_files?.length && !getTableFillingData(msg)"
+                v-else-if="msg.generated_files?.length && !getTableFillingData(msg) && msg.mixedSource !== 'merged'"
                 class="entity-preview table-fill-preview table-fill-downloads-only"
               >
                 <div class="entity-preview-header">

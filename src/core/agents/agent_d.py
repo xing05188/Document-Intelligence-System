@@ -77,15 +77,17 @@ class AgentB(BaseAgent):
         if not is_valid:
             return AgentResponse(success=False, message=error_msg)
 
+        progress_callback = kwargs.get("progress_callback")
+
         try:
-            return self._extract_entities(task_spec)
+            return self._extract_entities(task_spec, progress_callback=progress_callback)
         except Exception as e:
             return AgentResponse(
                 success=False,
                 message=f"提取失败: {str(e)}"
             )
 
-    def _extract_entities(self, task_spec: TaskSpec) -> AgentResponse:
+    def _extract_entities(self, task_spec: TaskSpec, progress_callback=None) -> AgentResponse:
         """
         根据自然语言条件筛选 Excel 行，并输出 JSON；如提供模板则进行填表。
         """
@@ -102,6 +104,9 @@ class AgentB(BaseAgent):
         if not rows:
             return AgentResponse(success=False, message="Excel中未读取到可用数据行")
 
+        if progress_callback:
+            progress_callback(1, 5, f"Excel数据读取完成，共 {len(rows)} 行数据")
+
         source_path = Path(excel_path).resolve()
         source_dir = source_path.parent
         default_json_output = str(source_dir / f"{source_path.stem}_filtered_rows.json")
@@ -110,6 +115,7 @@ class AgentB(BaseAgent):
         if table_targets and task_spec.template_file and self._is_supported_template(task_spec.template_file.path):
             template_path = task_spec.template_file.path
             allow_rule_fallback = bool(task_spec.parameters.get("allow_rule_fallback", True))
+            total_targets = len(table_targets)
 
             target_results = []
             union_rows: List[Dict[str, Any]] = []
@@ -118,6 +124,9 @@ class AgentB(BaseAgent):
                 target_instruction = str(target.get("instruction") or target.get("condition") or "").strip()
                 if not target_instruction:
                     return AgentResponse(success=False, message=f"table_targets[{idx}] 缺少 instruction/condition")
+
+                if progress_callback:
+                    progress_callback(idx, total_targets + 3, f"正在处理第 {idx}/{total_targets} 个表目标：正在生成筛选条件...")
 
                 field_candidates = self._extract_field_candidates(target_instruction, columns)
                 plan = self._build_filter_plan_with_llm(target_instruction, columns, field_candidates)
@@ -131,6 +140,9 @@ class AgentB(BaseAgent):
 
                 if not plan.get("conditions") and not plan.get("groups"):
                     return AgentResponse(success=False, message=f"table_targets[{idx}] 条件无法解析为可执行筛选计划")
+
+                if progress_callback:
+                    progress_callback(idx, total_targets + 3, f"正在处理第 {idx}/{total_targets} 个表目标：正在筛选数据...")
 
                 filtered_rows = self._apply_filter_plan(rows, plan)
                 union_rows.extend(filtered_rows)
@@ -163,6 +175,8 @@ class AgentB(BaseAgent):
                     "template_output_file",
                     str(source_dir / f"{source_path.stem}_filled{Path(template_path).suffix.lower() or '.xlsx'}"),
                 )
+                if progress_callback:
+                    progress_callback(total_targets + 1, total_targets + 3, f"正在填充 Excel 模板...")
                 template_output_path = self._fill_excel_template_multi(
                     template_path=template_path,
                     target_results=target_results,
@@ -173,13 +187,20 @@ class AgentB(BaseAgent):
                     "template_output_file",
                     str(source_dir / f"{source_path.stem}_filled{Path(template_path).suffix.lower() or '.docx'}"),
                 )
+                if progress_callback:
+                    progress_callback(total_targets + 1, total_targets + 3, f"正在填充 Word 模板...")
                 template_output_path = self._fill_docx_template_multi(
                     template_path=template_path,
                     target_results=target_results,
                     parameters=task_spec.parameters,
                 )
 
+            if progress_callback:
+                progress_callback(total_targets + 2, total_targets + 3, f"正在保存结果文件...")
             output_path = self._write_rows_to_json(union_rows, task_spec.output_file or default_json_output)
+
+            if progress_callback:
+                progress_callback(total_targets + 3, total_targets + 3, "多表填表处理完成")
 
             return AgentResponse(
                 success=True,
@@ -209,6 +230,8 @@ class AgentB(BaseAgent):
             )
 
         # 单表模式（原逻辑）
+        if progress_callback:
+            progress_callback(2, 5, "正在分析筛选条件...")
         field_candidates = self._extract_field_candidates(instruction, columns)
         plan = self._build_filter_plan_with_llm(instruction, columns, field_candidates)
         llm_has_conditions = bool(plan.get("conditions"))
@@ -228,13 +251,20 @@ class AgentB(BaseAgent):
                 message="LLM未生成可执行筛选计划，请检查模型配置或补充更明确条件"
             )
 
+        if progress_callback:
+            progress_callback(3, 5, f"正在执行数据筛选（共 {len(rows)} 行）...")
         filtered_rows = self._apply_filter_plan(rows, plan)
+
+        if progress_callback:
+            progress_callback(4, 5, f"筛选完成，命中 {len(filtered_rows)} 行，正在保存结果...")
         output_path = self._write_rows_to_json(filtered_rows, task_spec.output_file or default_json_output)
 
         template_output_path = None
         column_mapping: Dict[str, str] = {}
         if task_spec.template_file and self._is_supported_template(task_spec.template_file.path):
             template_path = task_spec.template_file.path
+            if progress_callback:
+                progress_callback(4, 5, "正在分析模板列映射...")
             template_columns = self._read_template_columns(template_path, task_spec.parameters)
             column_mapping = self._build_template_column_mapping(
                 source_columns=columns,
@@ -247,6 +277,8 @@ class AgentB(BaseAgent):
                     "template_output_file",
                     str(source_dir / f"{source_path.stem}_filled{Path(template_path).suffix.lower() or '.xlsx'}"),
                 )
+                if progress_callback:
+                    progress_callback(5, 5, "正在填充 Excel 模板...")
                 template_output_path = self._fill_excel_template(
                     filtered_rows=filtered_rows,
                     template_path=template_path,
@@ -258,12 +290,17 @@ class AgentB(BaseAgent):
                     "template_output_file",
                     str(source_dir / f"{source_path.stem}_filled{Path(template_path).suffix.lower() or '.docx'}"),
                 )
+                if progress_callback:
+                    progress_callback(5, 5, "正在填充 Word 模板...")
                 template_output_path = self._fill_docx_template(
                     filtered_rows=filtered_rows,
                     template_path=template_path,
                     mapping=column_mapping,
                     parameters=task_spec.parameters,
                 )
+
+        if progress_callback:
+            progress_callback(5, 5, "单表填表处理完成")
 
         return AgentResponse(
             success=True,
